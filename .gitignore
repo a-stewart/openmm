@@ -1,0 +1,50 @@
+# Unity generated directories
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# IDE and Visual Studio / Rider generated files
+.vs/
+.vscode/
+.idea/
+ExportedObj/
+.consulo/
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity3D generated meta files for ignored directories
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+# Crashlytics / build logs
+sysinfo.txt
+*.apk
+*.aab
+*.unitypackage
+*.app
+build_scene.log
+
+# Large runtime .ar archives and local player saves/settings
+/resources/*.ar
+/resources/players/
+/settings.json

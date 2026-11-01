@@ -1,0 +1,143 @@
+name: Build & Release (Windows + Linux)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag to publish (e.g. v0.1.0). Leave empty to only build workflow artifacts.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows-x64
+            targetPlatform: StandaloneWindows64
+            dockerImage: unityci/editor:ubuntu-6000.3.27f2-windows-mono-3
+            buildMethod: MM2.Editor.MM2StandaloneBuilder.BuildWindowsCommandLine
+          - name: Linux-x64
+            targetPlatform: StandaloneLinux64
+            dockerImage: unityci/editor:ubuntu-6000.3.27f2-linux-il2cpp-3
+            buildMethod: MM2.Editor.MM2StandaloneBuilder.BuildLinuxCommandLine
+
+    steps:
+      - name: Free Runner Disk Space for Unity 6 Docker Image
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-${{ matrix.targetPlatform }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: |
+            Library-${{ matrix.targetPlatform }}-
+            Library-
+
+      - name: Activate Unity 6 License & Build (${{ matrix.name }})
+        env:
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          BUILD_TARGET: ${{ matrix.targetPlatform }}
+          BUILD_METHOD: ${{ matrix.buildMethod }}
+        run: |
+          docker run --rm \
+            --workdir /github/workspace \
+            --shm-size=1025m \
+            --env UNITY_EMAIL \
+            --env UNITY_PASSWORD \
+            --env BUILD_TARGET \
+            --env BUILD_METHOD \
+            --volume "${GITHUB_WORKSPACE}:/github/workspace" \
+            "${{ matrix.dockerImage }}" \
+            /bin/bash -c '
+              set -e
+              dbus-uuidgen > /etc/machine-id
+              mkdir -p /var/lib/dbus /root/.cache/unity3d /root/.config/unity3d /root/.local/share/unity3d
+              ln -sf /etc/machine-id /var/lib/dbus/machine-id
+
+              echo "=== Activating Unity 6 Personal Entitlement License ==="
+              /opt/unity/Editor/Data/Resources/Licensing/Client/Unity.Licensing.Client \
+                --activate-all \
+                --include-personal \
+                --username "$UNITY_EMAIL" \
+                --password "$UNITY_PASSWORD"
+
+              /opt/unity/Editor/Data/Resources/Licensing/Client/Unity.Licensing.Client --showEntitlements
+
+              trap '\''/opt/unity/Editor/Data/Resources/Licensing/Client/Unity.Licensing.Client --deactivate-all --username "$UNITY_EMAIL" --password "$UNITY_PASSWORD" || true'\'' EXIT
+
+              echo "=== Building Open Madness ($BUILD_TARGET) ==="
+              unity-editor \
+                -logFile /dev/stdout \
+                -quit \
+                -projectPath /github/workspace \
+                -buildTarget "$BUILD_TARGET" \
+                -executeMethod "$BUILD_METHOD"
+            '
+
+      - name: Package Clean Release Archive (OpenMadness-${{ matrix.name }}.zip)
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}/Build" "${GITHUB_WORKSPACE}/Library"
+          cd "Build/${{ matrix.name }}"
+          rm -rf *_BurstDebugInformation_DoNotShip *_BackUpThisFolder_ButDontShipItWithYourGame
+          if [ -f "OpenMadness.x86_64" ]; then
+            chmod +x "OpenMadness.x86_64"
+          fi
+          zip -r "${GITHUB_WORKSPACE}/OpenMadness-${{ matrix.name }}.zip" .
+
+      - name: Upload Build Artifact (OpenMadness-${{ matrix.name }}.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMadness-${{ matrix.name }}
+          path: OpenMadness-${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    steps:
+      - name: Download All Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release & Attach Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          name: Open Madness ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ### Getting Started (Bring Your Own `.ar` Archives)
+            1. Download and extract the `.zip` archive for your platform (`OpenMadness-Windows-x64.zip` or `OpenMadness-Linux-x64.zip`).
+            2. Copy your legally owned **Midtown Madness 2** (and/or **Midtown Madness 1** / community mod) `.ar` archive files into the `resources/` folder next to the executable.
+            3. Launch `OpenMadness.exe` (Windows) or `OpenMadness.x86_64` (Linux).
+          files: |
+            artifacts/OpenMadness-Windows-x64.zip
+            artifacts/OpenMadness-Linux-x64.zip
