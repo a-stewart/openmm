@@ -428,13 +428,13 @@ namespace MM2.UI
             rt.anchorMax = anchor;
             rt.pivot = pivot;
             rt.anchoredPosition = anchoredPos;
-            rt.sizeDelta = size * 2f;
-            rt.localScale = new Vector3(0.5f, 0.5f, 1f);
+            rt.sizeDelta = size;
+            rt.localScale = Vector3.one;
 
             Text txt = go.AddComponent<Text>();
             txt.font = hudFontBold;
-            txt.fontStyle = FontStyle.Bold;
-            txt.fontSize = fontSize * 2;
+            txt.fontStyle = FontStyle.Normal;
+            txt.fontSize = fontSize;
             txt.alignment = alignment;
             txt.color = color;
             txt.text = initialText;
@@ -442,13 +442,12 @@ namespace MM2.UI
             txt.verticalOverflow = VerticalWrapMode.Overflow;
             txt.raycastTarget = false;
 
-            Outline ol = go.AddComponent<Outline>();
-            ol.effectColor = new Color(0f, 0f, 0f, 0.90f);
-            ol.effectDistance = new Vector2(3f, -3f);
-
-            Shadow sh = go.AddComponent<Shadow>();
-            sh.effectColor = new Color(0f, 0f, 0f, 0.92f);
-            sh.effectDistance = new Vector2(5f, -5f);
+            MM2SmoothTextEffect fx = go.AddComponent<MM2SmoothTextEffect>();
+            fx.IsHeaderStyle = false;
+            fx.OutlineRadius = 1.4f;
+            fx.OutlineColor = new Color32(0, 0, 0, 110);
+            fx.ShadowOffset = new Vector2(2.2f, -2.2f);
+            fx.ShadowColor = new Color32(0, 0, 0, 185);
 
             return txt;
         }
@@ -886,13 +885,13 @@ namespace MM2.UI
                 }
                 if (string.IsNullOrEmpty(texName)) continue;
 
-                Texture2D tileTex = MM2RuntimeDecoders.LoadUiTexture(texName);
+                Texture2D tileTex = LoadHudMapTileTexture(texName);
                 if ((tileTex == null || IsBlankHudMapTexture(tileTex)) &&
                     !texName.EndsWith("_ni", StringComparison.OrdinalIgnoreCase))
                 {
                     // Custom cities like Manhattan pack blank/all-zero .tex placeholders for the base
                     // shader names and store the actual 256x256 map tiles in <name>_ni.tga.
-                    Texture2D fallbackNiTex = MM2RuntimeDecoders.LoadUiTexture(texName + "_ni");
+                    Texture2D fallbackNiTex = LoadHudMapTileTexture(texName + "_ni");
                     if (fallbackNiTex != null && !IsBlankHudMapTexture(fallbackNiTex))
                     {
                         tileTex = fallbackNiTex;
@@ -963,6 +962,21 @@ namespace MM2.UI
             mr.receiveShadows = false;
 
             return true;
+        }
+
+        private static Texture2D LoadHudMapTileTexture(string texName)
+        {
+            // Load with 3D .pkg UV orientation (forUi: false) rather than 2D UI sprite orientation
+            // so .tga hudmap tiles (such as Manhattan's as_hudmap_*_ni.tga) are not flipped vertically,
+            // while clamping wrap mode so tile edges never bleed across seams.
+            Texture2D tex = MM2RuntimeDecoders.LoadTexture(texName).Texture;
+            if (tex != null)
+            {
+                tex.wrapMode = TextureWrapMode.Clamp;
+                tex.wrapModeU = TextureWrapMode.Clamp;
+                tex.wrapModeV = TextureWrapMode.Clamp;
+            }
+            return tex;
         }
 
         private static bool IsBlankHudMapTexture(Texture2D tex)

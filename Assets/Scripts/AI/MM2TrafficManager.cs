@@ -866,8 +866,8 @@ namespace MM2.AI
             if (playerFwd.sqrMagnitude > 0.001f) playerFwd.Normalize();
             else playerFwd = Vector3.forward;
 
-            float minDist = initialPopulate ? 32f : MinSpawnDistFromPlayer;
-            float maxDist = MaxSpawnDistFromPlayer;
+            float minDist = initialPopulate ? 26f : MinSpawnDistFromPlayer;
+            float maxDist = initialPopulate ? 165f : MaxSpawnDistFromPlayer;
 
             int roadCount = aiMap.DirectedRoads.Count;
             MM2AiMapData.BaiDirectedRoad chosenRoad = null;
@@ -878,7 +878,7 @@ namespace MM2.AI
             Vector3 spawnUp = Vector3.up;
 
             // Sample candidate roads around the player
-            for (int attempt = 0; attempt < 40; attempt++)
+            for (int attempt = 0; attempt < 90; attempt++)
             {
                 MM2AiMapData.BaiDirectedRoad road = aiMap.DirectedRoads[rng.Next(roadCount)];
                 if (road.DensityMultiplier <= 0.01f || road.LaneCount == 0 || road.TotalLength < 10f)
@@ -903,10 +903,18 @@ namespace MM2.AI
                     continue;
                 }
 
-                // When respawning during gameplay, prefer spawning ahead of the player's travel direction
-                if (!initialPopulate)
+                float fwdDot = Vector3.Dot(toCandidate.normalized, playerFwd);
+                if (initialPopulate)
                 {
-                    float fwdDot = Vector3.Dot(toCandidate.normalized, playerFwd);
+                    // Prefer roads ahead of the player's starting orientation so traffic is visible along the street ahead
+                    if (fwdDot < -0.10f && rng.NextDouble() < 0.78)
+                    {
+                        continue;
+                    }
+                }
+                else
+                {
+                    // When respawning during gameplay, prefer spawning ahead of the player's travel direction
                     if (fwdDot < -0.25f && rng.NextDouble() < 0.80)
                     {
                         continue;

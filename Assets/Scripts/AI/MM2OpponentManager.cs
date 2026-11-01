@@ -338,7 +338,7 @@ namespace MM2.AI
             }
 
             int pjCount = Mathf.Max(1, pkg.NumPaintjobs);
-            int pjIndex = (index + 1) % pjCount;
+            int pjIndex = (isCrashCourse ? index : (index + 1)) % pjCount;
 
             GameObject oppGo = new GameObject($"Opponent_{index + 1}_{pkgName}");
             oppGo.transform.SetParent(opponentsContainer, false);
@@ -398,12 +398,58 @@ namespace MM2.AI
             opp.StartPosition = startPos;
             opp.StartRotation = startRot;
 
-            // Spread opponent skill/speed slightly so the pack spreads out naturally
-            float skillSpread = Mathf.Lerp(1.04f, 0.89f, index / 7f);
+            // Convert .aimap speed values (authored in MPH, e.g. 50.0) into m/s (* 0.44704f)
+            // and bound each opponent's speed to its vehicle physics and the active event type.
+            const float MphToMs = 0.44704f;
+            float skillSpread = isCrashCourse ? 1.0f : Mathf.Lerp(1.02f, 0.88f, index / 7f);
             opp.PersonalSkillFactor = skillSpread;
-            opp.BaseTopSpeed = (def != null ? Mathf.Clamp(def.TargetSpeed, 28f, 48f) : 37f) * skillSpread;
-            opp.MaxThrottle = def != null ? Mathf.Clamp(def.MaxThrottle, 0.65f, 1.05f) : 0.90f;
+            opp.MaxThrottle = def != null ? Mathf.Clamp(def.MaxThrottle, 0.55f, 1.05f) : 0.90f;
             opp.CornerBraking = def != null ? Mathf.Clamp(def.CornerBraking, 0.45f, 1.0f) : 0.75f;
+
+            if (isCrashCourse)
+            {
+                int crashEv = MM2RaceManager.Instance != null ? MM2RaceManager.Instance.ActiveCrashEventType : -1;
+                float rawTargetMs = (def != null ? Mathf.Clamp(def.TargetSpeed, 30f, 65f) : 50f) * MphToMs;
+                if (crashEv == 2 || (def != null && def.BehaviorType == 1))
+                {
+                    // "Follow That Car!": pace the lead car at ~26.5-28.5 m/s (59-64 MPH) on straights
+                    // so it completes the route in ~85-95s while staying below the player cab's 79 MPH (35.3 m/s) top speed.
+                    opp.BaseTopSpeed = Mathf.Clamp(rawTargetMs * 1.24f * Mathf.Clamp(opp.MaxThrottle, 0.90f, 1.02f), 26.0f, 28.5f);
+                }
+                else if (crashEv == 8)
+                {
+                    // "Stop That Car!": pace the target car at ~24.5-27.0 m/s (55-60 MPH) so the player can catch and ram it.
+                    opp.BaseTopSpeed = Mathf.Clamp(rawTargetMs * 1.15f * Mathf.Clamp(opp.MaxThrottle, 0.85f, 1.0f), 24.5f, 27.0f);
+                }
+                else
+                {
+                    // Midterm / Final exam opponent car: ~27-30 m/s (60-67 MPH)
+                    opp.BaseTopSpeed = Mathf.Clamp(rawTargetMs * 1.28f, 27.0f, 30.0f);
+                }
+            }
+            else
+            {
+                VehicleSpec oppSpec = VehicleCatalog.GetSpec(pkgName);
+                float oppTransHighMph = (oppSpec != null && oppSpec.CarSim != null && oppSpec.CarSim.TransHigh > 30f)
+                    ? oppSpec.CarSim.TransHigh
+                    : 85f;
+                float oppCruiseMs = Mathf.Clamp(oppTransHighMph * MphToMs * 0.94f, 27.0f, 42.0f);
+
+                float playerCruiseMs = 37.0f;
+                if (playerTransform != null)
+                {
+                    ArcadeVehicleController playerCar = playerTransform.GetComponent<ArcadeVehicleController>();
+                    if (playerCar != null && playerCar.maxSpeedMph > 35f)
+                    {
+                        playerCruiseMs = Mathf.Clamp(playerCar.maxSpeedMph * MphToMs * 0.88f, 26.5f, 42.0f);
+                    }
+                }
+
+                float refTopMs = Mathf.Min(oppCruiseMs, playerCruiseMs * 1.03f);
+                float topMult = def != null ? Mathf.Clamp(def.TopSpeedMultiplier, 0.92f, 1.08f) : 1.0f;
+                float profileMult = MM2PlayerManager.IsActiveProfilePro() ? 1.0f : 0.95f;
+                opp.BaseTopSpeed = Mathf.Clamp(refTopMs * topMult * skillSpread * profileMult, 25.0f, 42.5f);
+            }
 
             // Spread lateral racing line offsets slightly so opponents don't drive single-file;
             // start at 0f on the starting grid so cars don't shift sideways when the countdown ends.
@@ -650,13 +696,13 @@ namespace MM2.AI
             opp.TotalRouteLength = Mathf.Max(1f, cumDist);
             opp.IsCircuitLoop = isCircuitRace;
 
-            // Compute curvature-based corner braking speeds looking 8m..28m ahead along the route
+            // Compute curvature-based corner braking speeds looking 4m..36m ahead along the route
             for (int i = 0; i < n; i++)
             {
                 OpponentRouteNode node = opp.RouteNodes[i];
                 float maxTurnAngle = 0f;
 
-                for (int look = 1; look <= 6; look++)
+                for (int look = 1; look <= 9; look++)
                 {
                     int j = i + look;
                     if (j >= n)
@@ -674,8 +720,10 @@ namespace MM2.AI
                 float cornerSpeed = opp.BaseTopSpeed;
                 if (maxTurnAngle > 12f)
                 {
-                    float severity = Mathf.Clamp01((maxTurnAngle - 12f) / 78f);
-                    float minCornerSpeed = Mathf.Lerp(19f, 12.5f, opp.CornerBraking);
+                    float severity = Mathf.Clamp01((maxTurnAngle - 12f) / 76f);
+                    float minCornerSpeed = isCrashCourse
+                        ? Mathf.Lerp(16.2f, 13.5f, opp.CornerBraking)
+                        : Mathf.Lerp(16.8f, 12.2f, opp.CornerBraking);
                     cornerSpeed = Mathf.Lerp(opp.BaseTopSpeed, minCornerSpeed, severity);
                 }
 
@@ -849,25 +897,54 @@ namespace MM2.AI
 
             // 2. Competitive pacing / gentle rubber-banding relative to player
             float rubberBandMult = 1f;
-            if (!isCrashCourse && playerTransform != null && !opp.HasFinished)
+            float throttleScale = isCrashCourse
+                ? 1.0f
+                : Mathf.Lerp(0.84f, 1.0f, Mathf.InverseLerp(0.55f, 1.0f, opp.MaxThrottle));
+
+            if (isCrashCourse && playerTransform != null && !opp.HasFinished)
+            {
+                int crashEv = MM2RaceManager.Instance != null ? MM2RaceManager.Instance.ActiveCrashEventType : -1;
+                if (crashEv == 2)
+                {
+                    // "Follow That Car!": regulate distance gently around the sweet spot between Near and Far
+                    float distToPlayer = Vector3.Distance(playerTransform.position, opp.transform.position);
+                    float nearDist = MM2RaceManager.Instance != null && MM2RaceManager.Instance.ActiveCrashFollowDistNear > 1f
+                        ? MM2RaceManager.Instance.ActiveCrashFollowDistNear
+                        : 25f;
+                    float farDist = MM2RaceManager.Instance != null && MM2RaceManager.Instance.ActiveCrashFollowDistFar > nearDist + 5f
+                        ? MM2RaceManager.Instance.ActiveCrashFollowDistFar
+                        : 75f;
+                    float midDist = 0.5f * (nearDist + farDist);
+
+                    if (distToPlayer > midDist + 10f)
+                    {
+                        rubberBandMult = Mathf.Lerp(1.0f, 0.90f, Mathf.Clamp01((distToPlayer - (midDist + 10f)) / Mathf.Max(8f, farDist - midDist)));
+                    }
+                    else if (distToPlayer < nearDist + 8f)
+                    {
+                        rubberBandMult = Mathf.Lerp(1.08f, 1.0f, Mathf.Clamp01((distToPlayer - nearDist) / 8f));
+                    }
+                }
+            }
+            else if (!isCrashCourse && playerTransform != null && !opp.HasFinished)
             {
                 Vector3 toPlayer = playerTransform.position - opp.transform.position;
                 float projAlongRoute = Vector3.Dot(toPlayer, routeFwd);
                 if (projAlongRoute > 35f)
                 {
                     // Player is ahead of this opponent -> slight catch-up boost
-                    rubberBandMult = Mathf.Lerp(1.0f, 1.15f, Mathf.Clamp01((projAlongRoute - 35f) / 140f));
+                    rubberBandMult = Mathf.Lerp(1.0f, 1.14f, Mathf.Clamp01((projAlongRoute - 35f) / 140f));
                 }
                 else if (projAlongRoute < -45f)
                 {
                     // Opponent is far ahead of player -> ease off slightly
-                    rubberBandMult = Mathf.Lerp(1.0f, 0.91f, Mathf.Clamp01((-projAlongRoute - 45f) / 160f));
+                    rubberBandMult = Mathf.Lerp(1.0f, 0.90f, Mathf.Clamp01((-projAlongRoute - 45f) / 150f));
                 }
             }
 
             float desiredSpeed = opp.HasFinished
                 ? 12f
-                : (routeSpeedLimit * opp.MaxThrottle * rubberBandMult);
+                : (routeSpeedLimit * throttleScale * rubberBandMult);
 
             // 3. Check for slower vehicles ahead and adjust lateral offset to overtake cleanly
             float targetLatOffset = opp.PreferredLateralOffset;
@@ -882,16 +959,18 @@ namespace MM2.AI
 
             opp.CurrentLateralOffset = Mathf.MoveTowards(opp.CurrentLateralOffset, targetLatOffset, 3.2f * dt);
 
-            // 4. Accelerate or brake toward desiredSpeed
-            opp.IsBraking = opp.CurrentSpeed > desiredSpeed + 1.8f;
+            // 4. Accelerate or brake toward desiredSpeed at realistic vehicle acceleration rates
+            opp.IsBraking = opp.CurrentSpeed > desiredSpeed + 1.6f;
             if (opp.CurrentSpeed < desiredSpeed)
             {
-                float accel = Mathf.Lerp(13.5f, 8.0f, Mathf.Clamp01(opp.CurrentSpeed / 42f));
+                float maxAccel = isCrashCourse ? 6.8f : (7.6f * Mathf.Clamp(opp.MaxThrottle, 0.80f, 1.05f));
+                float highSpeedAccel = isCrashCourse ? 4.4f : (4.8f * Mathf.Clamp(opp.MaxThrottle, 0.80f, 1.05f));
+                float accel = Mathf.Lerp(maxAccel, highSpeedAccel, Mathf.Clamp01(opp.CurrentSpeed / Mathf.Max(22f, opp.BaseTopSpeed)));
                 opp.CurrentSpeed = Mathf.MoveTowards(opp.CurrentSpeed, desiredSpeed, accel * dt);
             }
             else
             {
-                float brakeDecel = opp.IsBraking ? 17.5f : 6.0f;
+                float brakeDecel = opp.IsBraking ? 16.0f : 5.8f;
                 opp.CurrentSpeed = Mathf.MoveTowards(opp.CurrentSpeed, desiredSpeed, brakeDecel * dt);
             }
 

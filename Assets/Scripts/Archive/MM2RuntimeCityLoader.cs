@@ -46,6 +46,7 @@ namespace MM2.Archive
         public int NumCheckpoints;
         public int NumOpponents;
         public float TimeLimit;
+        public int AmbientDensity;
         public int ChkFlags;
         public int EventType;
         public float CornerSpeedMph;
@@ -1060,6 +1061,11 @@ namespace MM2.Archive
                     }
                 }
 
+                if (trafficDensity == 0 && stages.Length > 0 && stages[0].AmbientDensity > 0)
+                {
+                    trafficDensity = stages[0].AmbientDensity;
+                }
+
                 MM2CrashLessonType lType = ClassifyCrashLessonType(csvName);
                 typeTotalCounts[lType] = typeTotalCounts[lType] + 1;
 
@@ -1222,6 +1228,7 @@ namespace MM2.Archive
                 int numCp = 1;
                 int numOpp = 0;
                 float timeLim = 0f;
+                int ambDensity = 0;
                 int chkFlags = 0;
                 int eventType = 0;
                 float cornerMph = 50f;
@@ -1239,6 +1246,13 @@ namespace MM2.Archive
                     int.TryParse(cols[1].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out eventType);
                     int.TryParse(cols[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out numCp);
                     float.TryParse(cols[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out timeLim);
+                    if (float.TryParse(cols[4].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedAmb) && parsedAmb > 0f)
+                    {
+                        ambDensity = Mathf.Clamp(
+                            parsedAmb > 1.0f ? Mathf.RoundToInt(parsedAmb) : Mathf.RoundToInt(parsedAmb * 100f),
+                            0,
+                            100);
+                    }
                     if (float.TryParse(cols[5].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedCorner) && parsedCorner > 1f)
                     {
                         cornerMph = parsedCorner;
@@ -1297,6 +1311,7 @@ namespace MM2.Archive
                     NumCheckpoints = Mathf.Max(1, numCp),
                     NumOpponents = Mathf.Max(0, numOpp),
                     TimeLimit = Mathf.Max(0f, timeLim),
+                    AmbientDensity = ambDensity,
                     ChkFlags = chkFlags,
                     EventType = eventType,
                     CornerSpeedMph = cornerMph,

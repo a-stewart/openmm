@@ -199,6 +199,19 @@ namespace MM2.AI
                 ? 1f
                 : Mathf.Clamp01(MM2GameSession.CopDensity / 100f);
 
+            float playerTopSpeedMs = 36f;
+            if (playerTransform != null)
+            {
+                ArcadeVehicleController playerCar = playerTransform.GetComponent<ArcadeVehicleController>();
+                if (playerCar != null && playerCar.maxSpeedMph > 35f)
+                {
+                    playerTopSpeedMs = playerCar.maxSpeedMph * 0.44704f;
+                }
+            }
+            float targetPursuitSpeed = isCrashCourse
+                ? Mathf.Clamp(playerTopSpeedMs * 0.80f, 24.5f, 28.5f)
+                : Mathf.Clamp(playerTopSpeedMs * 0.92f, 28.5f, 36.5f);
+
             // 1. Spawn race-specific [Police] placements from <race>.aimap
             if (aiMap.PoliceSpawns.Count > 0)
             {
@@ -220,7 +233,7 @@ namespace MM2.AI
 
                     cop.HomePosition = snappedHomePos;
                     cop.HomeRotation = alignedRot;
-                    cop.MaxPursuitSpeed = Mathf.Clamp(def.MaxSpeed, 34f, 54f);
+                    cop.MaxPursuitSpeed = targetPursuitSpeed;
                     cop.DetectRadius = Mathf.Clamp(def.DetectRadius, 48f, 110f);
                     cop.State = MM2PoliceState.StationaryWatch;
 
@@ -252,7 +265,7 @@ namespace MM2.AI
                 if (patrolCop == null) continue;
 
                 patrolCop.IsFixedRaceSpawn = false;
-                patrolCop.MaxPursuitSpeed = 46f;
+                patrolCop.MaxPursuitSpeed = targetPursuitSpeed;
                 patrolCop.DetectRadius = 72f;
                 patrolCop.State = MM2PoliceState.Patrol;
 
@@ -772,13 +785,13 @@ namespace MM2.AI
             cop.SteerAngleDeg = steerInput * 28f;
 
             // Reduce target speed when making a hard turn
-            if (Mathf.Abs(signedAngle) > 40f)
+            if (Mathf.Abs(signedAngle) > 35f)
             {
-                desiredSpeed = Mathf.Min(desiredSpeed, 18f);
+                desiredSpeed = Mathf.Min(desiredSpeed, 13.5f);
             }
 
-            cop.IsBraking = cop.CurrentSpeed > desiredSpeed + 3f;
-            float accelRate = cop.IsBraking ? 18f : 14.5f;
+            cop.IsBraking = cop.CurrentSpeed > desiredSpeed + 2.2f;
+            float accelRate = cop.IsBraking ? 15f : 7.4f;
             cop.CurrentSpeed = Mathf.MoveTowards(cop.CurrentSpeed, desiredSpeed, accelRate * dt);
 
             // Apply yaw rotation proportional to speed and steering angle

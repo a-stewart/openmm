@@ -110,6 +110,13 @@ namespace MM2.UI
         private bool crashLessonPassed;
         private string crashEndStatusText;
 
+        public int ActiveCrashEventType =>
+            string.Equals(ActiveRaceType, "CrashCourse", StringComparison.OrdinalIgnoreCase) && activeCrashLesson != null
+                ? activeCrashStage.EventType
+                : -1;
+        public float ActiveCrashFollowDistNear => activeCrashStage.FollowDistNear;
+        public float ActiveCrashFollowDistFar => activeCrashStage.FollowDistFar;
+
         public static MM2RaceManager EnsureExists()
         {
             if (instance != null) return instance;
@@ -560,7 +567,10 @@ namespace MM2.UI
             CurrentLap = 1;
             TotalLaps = 1;
 
-            crashHasCountdownTimer = activeCrashStage.TimeLimit > 0.5f;
+            // EventType 2 ("Follow That Car!") stages store 36 in the TimeLimit column for follow distance/config
+            // and do not impose a 36-second countdown timer across a 2.5-3.5 km city tailing route.
+            crashHasCountdownTimer = activeCrashStage.TimeLimit > 0.5f &&
+                                     !(activeCrashStage.EventType == 2 && activeCrashStage.TimeLimit <= 60f);
             DisplayTimeSeconds = crashHasCountdownTimer ? activeCrashStage.TimeLimit : 0f;
 
             for (int i = 1; i < waypoints.Count; i++)
@@ -578,6 +588,9 @@ namespace MM2.UI
 
             MM2GameSession.NumOpponents = activeCrashStage.NumOpponents;
             MM2GameSession.RaceTimeLimit = activeCrashStage.TimeLimit;
+            MM2GameSession.TrafficDensity = activeCrashStage.AmbientDensity > 0
+                ? activeCrashStage.AmbientDensity
+                : activeCrashLesson.TrafficDensity;
 
             countdownElapsed = 0f;
             countdownStage = 0;
@@ -740,6 +753,9 @@ namespace MM2.UI
                     activeCrashStage.EventType == 3 ||
                     (currentAiMap != null && currentAiMap.PoliceSpawns.Count > 0 && activeCrashStage.NumOpponents == 0);
                 MM2GameSession.CopDensity = stageUsesPolice ? Mathf.Max(100, activeCrashLesson.CopDensity) : activeCrashLesson.CopDensity;
+                MM2GameSession.TrafficDensity = activeCrashStage.AmbientDensity > 0
+                    ? activeCrashStage.AmbientDensity
+                    : activeCrashLesson.TrafficDensity;
                 MM2GameSession.NumOpponents = activeCrashStage.NumOpponents;
             }
 

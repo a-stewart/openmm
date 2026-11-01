@@ -50,9 +50,11 @@ namespace MM2.AI
         {
             public string PkgName;
             public string OppFileName;
+            public int BehaviorType;
             public float MaxThrottle = 1f;
             public float TargetSpeed = 40f;
             public float CornerBraking = 0.75f;
+            public float TopSpeedMultiplier = 1f;
             public Vector3 StartPosition;
             public Quaternion StartRotation = Quaternion.identity;
             public bool HasValidStartPose;
@@ -704,6 +706,10 @@ namespace MM2.AI
                             {
                                 opp.MaxThrottle = Mathf.Clamp(throttle, 0.4f, 1.2f);
                             }
+                            if (parts.Length >= 4 && int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int behType))
+                            {
+                                opp.BehaviorType = behType;
+                            }
                             if (parts.Length >= 5 && float.TryParse(parts[4], NumberStyles.Float, CultureInfo.InvariantCulture, out float spd))
                             {
                                 opp.TargetSpeed = Mathf.Max(15f, spd);
@@ -711,6 +717,10 @@ namespace MM2.AI
                             if (parts.Length >= 6 && float.TryParse(parts[5], NumberStyles.Float, CultureInfo.InvariantCulture, out float brake))
                             {
                                 opp.CornerBraking = Mathf.Clamp(brake, 0.2f, 1.2f);
+                            }
+                            if (parts.Length >= 12 && float.TryParse(parts[parts.Length - 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float topMult))
+                            {
+                                opp.TopSpeedMultiplier = Mathf.Clamp(topMult, 0.7f, 1.2f);
                             }
 
                             ParseOpponentOppFile(opp, raceDir);

@@ -31,6 +31,156 @@ namespace MM2.UI
         public readonly List<MM2EventResultEntry> Entries = new List<MM2EventResultEntry>();
     }
 
+    /// <summary>
+    /// High-quality circular multi-sample outline & drop shadow effect for Unity UI Text.
+    /// Replaces Unity's 4-corner diagonal Outline + cascading Shadow (which caused 45-degree corner staircase notches
+    /// and uneven overlapping shadow blobs) with smooth radial ring sampling directly from the clean base glyph.
+    /// </summary>
+    [DisallowMultipleComponent]
+    public class MM2SmoothTextEffect : BaseMeshEffect
+    {
+        public bool IsHeaderStyle;
+        public float OutlineRadius = 1.25f;
+        public Color32 OutlineColor = new Color32(0, 0, 0, 96);
+        public Vector2 ShadowOffset = new Vector2(2.0f, -2.0f);
+        public Color32 ShadowColor = new Color32(0, 0, 0, 175);
+
+        private static readonly List<UIVertex> s_BaseVerts = new List<UIVertex>(2048);
+        private static readonly List<UIVertex> s_OutVerts = new List<UIVertex>(32768);
+
+        private static readonly Vector2[] s_Dir8 = BuildCircleDirections(8);
+        private static readonly Vector2[] s_Dir12 = BuildCircleDirections(12);
+        private static readonly Vector2[] s_Dir16 = BuildCircleDirections(16);
+
+        private static Vector2[] BuildCircleDirections(int count)
+        {
+            var dirs = new Vector2[count];
+            for (int i = 0; i < count; i++)
+            {
+                float angle = (2f * Mathf.PI * i) / count;
+                dirs[i] = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+            }
+            return dirs;
+        }
+
+        public override void ModifyMesh(VertexHelper vh)
+        {
+            if (!IsActive() || vh == null) return;
+
+            s_BaseVerts.Clear();
+            vh.GetUIVertexStream(s_BaseVerts);
+            int baseCount = s_BaseVerts.Count;
+            if (baseCount == 0) return;
+
+            s_OutVerts.Clear();
+
+            if (IsHeaderStyle)
+            {
+                int needed = baseCount * (8 + 16 + 12 + 12 + 1);
+                if (s_OutVerts.Capacity < needed) s_OutVerts.Capacity = needed;
+
+                // 1. Soft feathered drop shadow (8 circular samples around +5.5, -5.5)
+                Color32 shCol = new Color32(0, 0, 0, 48);
+                for (int i = 0; i < s_Dir8.Length; i++)
+                {
+                    Vector2 d = s_Dir8[i];
+                    AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, 5.5f + d.x * 1.6f, -5.5f + d.y * 1.6f, shCol);
+                }
+
+                // 2. Outer dark-navy/black stroke: feathered outer AA ring (16 samples) + solid inner ring (12 samples)
+                Color32 outerFeathered = new Color32(8, 8, 28, 110);
+                for (int i = 0; i < s_Dir16.Length; i++)
+                {
+                    Vector2 d = s_Dir16[i];
+                    AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, d.x * 4.2f, d.y * 4.2f, outerFeathered);
+                }
+
+                Color32 outerCore = new Color32(8, 8, 28, 195);
+                for (int i = 0; i < s_Dir12.Length; i++)
+                {
+                    Vector2 d = s_Dir12[i];
+                    AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, d.x * 2.65f, d.y * 2.65f, outerCore);
+                }
+
+                // 3. Inner warm red-orange bevel rim (12 circular samples shifted slightly lower-right)
+                Color32 innerRim = new Color32(205, 50, 8, 150);
+                for (int i = 0; i < s_Dir12.Length; i++)
+                {
+                    Vector2 d = s_Dir12[i];
+                    AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, 0.55f + d.x * 1.45f, -0.55f + d.y * 1.45f, innerRim);
+                }
+
+                // 4. Crisp base glyph on top
+                for (int i = 0; i < baseCount; i++)
+                {
+                    s_OutVerts.Add(s_BaseVerts[i]);
+                }
+            }
+            else
+            {
+                // Guard against Unity UI's 65,000 vertex-per-mesh limit on long text blocks
+                const int MaxStreamVerts = 63000;
+                bool canIncludeOutline = (baseCount * 10) <= MaxStreamVerts;
+                bool canIncludeShadow = (baseCount * 2) <= MaxStreamVerts;
+                if (!canIncludeShadow)
+                {
+                    return;
+                }
+
+                int needed = baseCount * (1 + (canIncludeOutline ? 8 : 0) + 1);
+                if (s_OutVerts.Capacity < needed) s_OutVerts.Capacity = needed;
+
+                // 1. Clean drop shadow of the base glyph only (no cascaded shadow-of-outline artifacts)
+                if (ShadowColor.a > 0)
+                {
+                    AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, ShadowOffset.x, ShadowOffset.y, ShadowColor);
+                }
+
+                // 2. Smooth 8-direction circular outline around the base glyph
+                if (canIncludeOutline && OutlineColor.a > 0 && OutlineRadius > 0.01f)
+                {
+                    for (int i = 0; i < s_Dir8.Length; i++)
+                    {
+                        Vector2 d = s_Dir8[i];
+                        AppendShiftedCopy(s_BaseVerts, baseCount, s_OutVerts, d.x * OutlineRadius, d.y * OutlineRadius, OutlineColor);
+                    }
+                }
+
+                // 3. Crisp base glyph on top
+                for (int i = 0; i < baseCount; i++)
+                {
+                    s_OutVerts.Add(s_BaseVerts[i]);
+                }
+            }
+
+            vh.Clear();
+            vh.AddUIVertexTriangleStream(s_OutVerts);
+        }
+
+        private static void AppendShiftedCopy(
+            List<UIVertex> src,
+            int count,
+            List<UIVertex> dst,
+            float dx,
+            float dy,
+            Color32 effectColor
+        )
+        {
+            for (int i = 0; i < count; i++)
+            {
+                UIVertex v = src[i];
+                Vector3 pos = v.position;
+                pos.x += dx;
+                pos.y += dy;
+                v.position = pos;
+                Color32 c = effectColor;
+                c.a = (byte)((c.a * v.color.a) / 255);
+                v.color = c;
+                dst.Add(v);
+            }
+        }
+    }
+
     [Serializable]
     public class MM2SettingsData
     {
@@ -496,6 +646,9 @@ namespace MM2.UI
         private Sprite spCcSmFail;
         private Sprite spCcPass;
         private Sprite spCcFail;
+        private Sprite spCheckboxUnchecked;
+        private Sprite spCheckboxCheckedGreen;
+        private Sprite spCheckboxCheckedBlue;
 
         private GameObject activeDropdownOverlay;
         private Action onActiveDropdownClosed;
@@ -536,6 +689,7 @@ namespace MM2.UI
         private Text txtDisplayValue;
         private Text txtResolutionValue;
         private Text txtWindowModeValue;
+        private Image imgLiveUiCheckboxBox;
         private Image imgLiveUiCheckTick;
         private Text txtLiveUiCheckMark;
         private Text txtOptionsBottomHelp;
@@ -1128,8 +1282,12 @@ namespace MM2.UI
 
             spLogoMM2 = LoadSprite("UI/MM2/logo");
 
-            spCcSmChk = LoadCrashCourseSmallCheckSprite(cellYStart: 12); // Middle 12x12 cell of cc_smchk.tga = green tick
-            spCcSmFail = LoadCrashCourseSmallCheckSprite(cellYStart: 0); // Bottom 12x12 cell of cc_smchk.tga = red X
+            spCheckboxUnchecked = BuildHighResCheckboxSprite(mode: 0);
+            spCheckboxCheckedGreen = BuildHighResCheckboxSprite(mode: 1);
+            spCheckboxCheckedBlue = BuildHighResCheckboxSprite(mode: 2);
+
+            spCcSmChk = BuildHighResStandaloneIconSprite(isCheckTick: true);
+            spCcSmFail = BuildHighResStandaloneIconSprite(isCheckTick: false);
             spCcPass = LoadArchiveUiSprite("cc_pass");
             spCcFail = LoadArchiveUiSprite("cc_fail");
         }
@@ -1141,49 +1299,299 @@ namespace MM2.UI
             return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f);
         }
 
-        /// <summary>
-        /// Extracts a single 10x10 icon cell from MM2's 3-frame vertical strip texture `cc_smchk.tga` (12x36:
-        /// y=24..35 empty box, y=12..23 green tick, y=0..11 red X), keying out the black background and 1px frame border.
-        /// </summary>
-        private static Sprite LoadCrashCourseSmallCheckSprite(int cellYStart)
+        private static float DistanceToSegment(float px, float py, float ax, float ay, float bx, float by)
         {
-            Texture2D src = MM2RuntimeDecoders.LoadUiTexture("cc_smchk");
-            if (src == null || src.width < 12 || src.height < cellYStart + 12) return null;
-
-            const int iconSize = 10;
-            Color32[] srcPixels = src.GetPixels32();
-            Color32[] dstPixels = new Color32[iconSize * iconSize];
-
-            for (int y = 0; y < iconSize; y++)
+            float vx = bx - ax;
+            float vy = by - ay;
+            float wx = px - ax;
+            float wy = py - ay;
+            float c1 = vx * wx + vy * wy;
+            if (c1 <= 0f) return Mathf.Sqrt(wx * wx + wy * wy);
+            float c2 = vx * vx + vy * vy;
+            if (c2 <= c1)
             {
-                int sy = cellYStart + 1 + y;
-                for (int x = 0; x < iconSize; x++)
+                float dx = px - bx;
+                float dy = py - by;
+                return Mathf.Sqrt(dx * dx + dy * dy);
+            }
+            float b = c1 / c2;
+            float pbx = ax + b * vx;
+            float pby = ay + b * vy;
+            float rx = px - pbx;
+            float ry = py - pby;
+            return Mathf.Sqrt(rx * rx + ry * ry);
+        }
+
+        private static float SmoothStep01(float edge0, float edge1, float x)
+        {
+            float t = Mathf.Clamp01((x - edge0) / Mathf.Max(0.0001f, edge1 - edge0));
+            return t * t * (3f - 2f * t);
+        }
+
+        /// <summary>
+        /// Synthesizes a crisp 128x128 high-DPI MM2 beveled navy checkbox sprite with custom box-filtered mipmaps
+        /// (mode 0 = unchecked, mode 1 = checked with glossy vibrant green tick, mode 2 = checked with electric blue/cyan tick).
+        /// </summary>
+        private static Sprite BuildHighResCheckboxSprite(int mode)
+        {
+            const int size = 128;
+            Color32[] pixels = new Color32[size * size];
+            float inv = 1f / (size - 1f);
+            float aaPx = 1.35f / size;
+
+            for (int y = 0; y < size; y++)
+            {
+                // Top-down normalized Y (0 = top, 1 = bottom)
+                float ny = 1f - (y * inv);
+                for (int x = 0; x < size; x++)
                 {
-                    int sx = 1 + x;
-                    Color32 c = srcPixels[sy * src.width + sx];
-                    // Key out pure black background pixels inside the 10x10 cell interior
-                    int lum = c.r + c.g + c.b;
-                    if (lum < 36)
+                    float nx = x * inv;
+                    float margin = Mathf.Max(Mathf.Abs(nx - 0.5f), Mathf.Abs(ny - 0.5f)) * 2f;
+
+                    float r, g, b, a;
+                    if (margin > 0.96f)
                     {
-                        dstPixels[y * iconSize + x] = new Color32(0, 0, 0, 0);
+                        float aa = Mathf.Clamp01((1f - margin) * (size * 0.5f));
+                        r = 6f;
+                        g = 8f;
+                        b = 34f;
+                        a = 255f * aa;
+                    }
+                    else if (margin > 0.78f)
+                    {
+                        float bevelT = Mathf.Clamp01(((1f - nx) + (1f - ny)) * 0.5f);
+                        float frameU = (margin - 0.78f) / (0.96f - 0.78f);
+                        float ridge = Mathf.Clamp01(1f - Mathf.Abs(frameU - 0.45f) * 1.4f);
+                        r = 58f + 78f * bevelT + 36f * ridge;
+                        g = 78f + 92f * bevelT + 42f * ridge;
+                        b = 195f + 48f * bevelT + 12f * ridge;
+                        a = 255f;
+                    }
+                    else if (margin > 0.72f)
+                    {
+                        float bevelT = Mathf.Clamp01((nx + ny) * 0.5f);
+                        r = 12f + 24f * bevelT;
+                        g = 18f + 32f * bevelT;
+                        b = 58f + 75f * bevelT;
+                        a = 255f;
                     }
                     else
                     {
-                        dstPixels[y * iconSize + x] = new Color32(c.r, c.g, c.b, 255);
+                        r = 4f + 8f * ny;
+                        g = 7f + 14f * ny;
+                        b = 38f + 36f * ny;
+                        a = 255f;
                     }
+
+                    if (mode == 1 || mode == 2)
+                    {
+                        float d1 = DistanceToSegment(nx, ny, 0.23f, 0.54f, 0.43f, 0.73f);
+                        float d2 = DistanceToSegment(nx, ny, 0.43f, 0.73f, 0.78f, 0.26f);
+                        float dTick = Mathf.Min(d1, d2);
+
+                        float sd1 = DistanceToSegment(nx - 0.025f, ny - 0.03f, 0.23f, 0.54f, 0.43f, 0.73f);
+                        float sd2 = DistanceToSegment(nx - 0.025f, ny - 0.03f, 0.43f, 0.73f, 0.78f, 0.26f);
+                        float dShadow = Mathf.Min(sd1, sd2);
+
+                        const float strokeR = 0.074f;
+                        const float outlineR = strokeR + 0.024f;
+
+                        float shAlpha = (1f - SmoothStep01(outlineR - aaPx, outlineR + aaPx * 3f, dShadow)) * 0.65f;
+                        if (shAlpha > 0f)
+                        {
+                            r *= (1f - shAlpha);
+                            g *= (1f - shAlpha);
+                            b *= (1f - shAlpha);
+                        }
+
+                        float olAlpha = 1f - SmoothStep01(outlineR - aaPx, outlineR + aaPx, dTick);
+                        if (olAlpha > 0f)
+                        {
+                            float orC = mode == 1 ? 4f : 4f;
+                            float ogC = mode == 1 ? 24f : 14f;
+                            float obC = mode == 1 ? 10f : 38f;
+                            r = Mathf.Lerp(r, orC, olAlpha);
+                            g = Mathf.Lerp(g, ogC, olAlpha);
+                            b = Mathf.Lerp(b, obC, olAlpha);
+                        }
+
+                        float fillAlpha = 1f - SmoothStep01(strokeR - aaPx, strokeR + aaPx, dTick);
+                        if (fillAlpha > 0f)
+                        {
+                            float ridge = Mathf.Clamp01(1f - (dTick / strokeR));
+                            float gloss = Mathf.Clamp01((0.75f - ny) * 0.8f + ridge * 0.5f);
+                            float cr, cg, cb;
+                            if (mode == 1)
+                            {
+                                cr = 24f + 85f * gloss;
+                                cg = 215f + 40f * gloss;
+                                cb = 52f + 75f * gloss;
+                            }
+                            else
+                            {
+                                cr = 65f + 115f * gloss;
+                                cg = 155f + 85f * gloss;
+                                cb = 245f + 10f * gloss;
+                            }
+                            r = Mathf.Lerp(r, cr, fillAlpha);
+                            g = Mathf.Lerp(g, cg, fillAlpha);
+                            b = Mathf.Lerp(b, cb, fillAlpha);
+                        }
+                    }
+
+                    pixels[y * size + x] = new Color32(
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(r), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(g), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(b), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(a), 0, 255)
+                    );
                 }
             }
 
-            Texture2D cellTex = new Texture2D(iconSize, iconSize, TextureFormat.RGBA32, false)
-            {
-                name = $"cc_smchk_cell_{cellYStart}",
-                wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Point
-            };
-            cellTex.SetPixels32(dstPixels);
-            cellTex.Apply(false, false);
+            Texture2D tex = CreateCrispMipmappedUiTexture($"MM2_HighResCheckbox_{mode}", size, pixels);
+            return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+        }
 
-            return Sprite.Create(cellTex, new Rect(0, 0, iconSize, iconSize), new Vector2(0.5f, 0.5f), 100f);
+        /// <summary>
+        /// Synthesizes a crisp 128x128 standalone green checkmark or red X sprite for Crash Course & Driver Records rows.
+        /// </summary>
+        private static Sprite BuildHighResStandaloneIconSprite(bool isCheckTick)
+        {
+            const int size = 128;
+            Color32[] pixels = new Color32[size * size];
+            float inv = 1f / (size - 1f);
+            float aaPx = 1.4f / size;
+
+            for (int y = 0; y < size; y++)
+            {
+                float ny = 1f - (y * inv);
+                for (int x = 0; x < size; x++)
+                {
+                    float nx = x * inv;
+                    float dShape, dShadow;
+                    if (isCheckTick)
+                    {
+                        float d1 = DistanceToSegment(nx, ny, 0.16f, 0.54f, 0.41f, 0.78f);
+                        float d2 = DistanceToSegment(nx, ny, 0.41f, 0.78f, 0.85f, 0.20f);
+                        dShape = Mathf.Min(d1, d2);
+
+                        float sd1 = DistanceToSegment(nx - 0.03f, ny - 0.035f, 0.16f, 0.54f, 0.41f, 0.78f);
+                        float sd2 = DistanceToSegment(nx - 0.03f, ny - 0.035f, 0.41f, 0.78f, 0.85f, 0.20f);
+                        dShadow = Mathf.Min(sd1, sd2);
+                    }
+                    else
+                    {
+                        float d1 = DistanceToSegment(nx, ny, 0.22f, 0.22f, 0.78f, 0.78f);
+                        float d2 = DistanceToSegment(nx, ny, 0.78f, 0.22f, 0.22f, 0.78f);
+                        dShape = Mathf.Min(d1, d2);
+
+                        float sd1 = DistanceToSegment(nx - 0.03f, ny - 0.035f, 0.22f, 0.22f, 0.78f, 0.78f);
+                        float sd2 = DistanceToSegment(nx - 0.03f, ny - 0.035f, 0.78f, 0.22f, 0.22f, 0.78f);
+                        dShadow = Mathf.Min(sd1, sd2);
+                    }
+
+                    const float strokeR = 0.095f;
+                    const float outlineR = strokeR + 0.032f;
+
+                    float shAlpha = (1f - SmoothStep01(outlineR - aaPx, outlineR + aaPx * 2.5f, dShadow)) * 0.55f;
+                    float olAlpha = 1f - SmoothStep01(outlineR - aaPx, outlineR + aaPx, dShape);
+                    float fillAlpha = 1f - SmoothStep01(strokeR - aaPx, strokeR + aaPx, dShape);
+
+                    float outA = Mathf.Clamp01(shAlpha + olAlpha * (1f - shAlpha));
+                    if (outA <= 0.001f)
+                    {
+                        pixels[y * size + x] = new Color32(0, 0, 0, 0);
+                        continue;
+                    }
+
+                    float r = isCheckTick ? 4f : 28f;
+                    float g = isCheckTick ? 24f : 4f;
+                    float b = isCheckTick ? 8f : 4f;
+
+                    if (fillAlpha > 0f)
+                    {
+                        float ridge = Mathf.Clamp01(1f - (dShape / strokeR));
+                        float gloss = Mathf.Clamp01((0.75f - ny) * 0.8f + ridge * 0.5f);
+                        float cr = isCheckTick ? (26f + 85f * gloss) : (225f + 30f * gloss);
+                        float cg = isCheckTick ? (220f + 35f * gloss) : (32f + 70f * gloss);
+                        float cb = isCheckTick ? (54f + 75f * gloss) : (32f + 65f * gloss);
+                        r = Mathf.Lerp(r, cr, fillAlpha);
+                        g = Mathf.Lerp(g, cg, fillAlpha);
+                        b = Mathf.Lerp(b, cb, fillAlpha);
+                    }
+
+                    pixels[y * size + x] = new Color32(
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(r), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(g), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(b), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(outA * 255f), 0, 255)
+                    );
+                }
+            }
+
+            Texture2D tex = CreateCrispMipmappedUiTexture(isCheckTick ? "MM2_HighResTick" : "MM2_HighResCross", size, pixels);
+            return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+        }
+
+        private static Texture2D CreateCrispMipmappedUiTexture(string name, int size, Color32[] mip0)
+        {
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, true)
+            {
+                name = name,
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Trilinear,
+                mipMapBias = -0.65f
+            };
+            tex.SetPixels32(mip0, 0);
+
+            // Generate premultiplied-alpha-aware box-filtered mipmaps so downscaling stays razor-sharp with no dark fringes
+            Color32[] prev = mip0;
+            int prevSize = size;
+            int mipLevel = 1;
+            while (prevSize > 1)
+            {
+                int nextSize = prevSize >> 1;
+                Color32[] next = new Color32[nextSize * nextSize];
+                for (int y = 0; y < nextSize; y++)
+                {
+                    int sy0 = y * 2;
+                    int sy1 = sy0 + 1;
+                    for (int x = 0; x < nextSize; x++)
+                    {
+                        int sx0 = x * 2;
+                        int sx1 = sx0 + 1;
+                        Color32 c00 = prev[sy0 * prevSize + sx0];
+                        Color32 c10 = prev[sy0 * prevSize + sx1];
+                        Color32 c01 = prev[sy1 * prevSize + sx0];
+                        Color32 c11 = prev[sy1 * prevSize + sx1];
+
+                        int aSum = c00.a + c10.a + c01.a + c11.a;
+                        if (aSum == 0)
+                        {
+                            next[y * nextSize + x] = new Color32(0, 0, 0, 0);
+                        }
+                        else
+                        {
+                            int rPremul = c00.r * c00.a + c10.r * c10.a + c01.r * c01.a + c11.r * c11.a;
+                            int gPremul = c00.g * c00.a + c10.g * c10.a + c01.g * c01.a + c11.g * c11.a;
+                            int bPremul = c00.b * c00.a + c10.b * c10.a + c01.b * c01.a + c11.b * c11.a;
+                            next[y * nextSize + x] = new Color32(
+                                (byte)Mathf.Clamp((rPremul + (aSum >> 1)) / aSum, 0, 255),
+                                (byte)Mathf.Clamp((gPremul + (aSum >> 1)) / aSum, 0, 255),
+                                (byte)Mathf.Clamp((bPremul + (aSum >> 1)) / aSum, 0, 255),
+                                (byte)((aSum + 2) >> 2)
+                            );
+                        }
+                    }
+                }
+                tex.SetPixels32(next, mipLevel);
+                prev = next;
+                prevSize = nextSize;
+                mipLevel++;
+            }
+
+            tex.Apply(false, false);
+            return tex;
         }
 
         private static Font LoadFontResource(string resourcePath, string[] osFallbackNames)
@@ -1294,9 +1702,9 @@ namespace MM2.UI
             CreateSolidRect("Divider_TopHoriz", chromeBarsGroup.transform, 94f, 100f, 1826f, 4f, new Color32(8, 8, 52, 255));
             dividerMidVert = CreateSolidRect("Divider_MidVert", chromeBarsGroup.transform, 828f, 0f, 4f, 860f, new Color32(8, 8, 52, 255));
 
-            // Top Horizontal Silver-to-Navy Header Bar
+            // Top Horizontal Silver-to-Navy Header Bar (stops flush at the solid left border of Btn_TopOptions at x=1457)
             CreateSpriteImage("Bar_HorizLeftStub", chromeBarsGroup.transform, spBarHoriz, 0f, 36f, 60f, 34f);
-            CreateSpriteImage("Bar_HorizMain", chromeBarsGroup.transform, spBarHoriz, 94f, 36f, 1370f, 34f);
+            CreateSpriteImage("Bar_HorizMain", chromeBarsGroup.transform, spBarHoriz, 94f, 36f, 1363f, 34f);
 
             // Left Vertical Silver-to-Navy Chrome Bar
             CreateSpriteImage("Bar_VertChrome", chromeBarsGroup.transform, spBarVert, 60f, 0f, 34f, 1080f);
@@ -1566,7 +1974,7 @@ namespace MM2.UI
             if (mainMenuStatsViewMode == 1)
             {
                 int cityCount = MM2PlayerManager.GetAllCityCodes().Count;
-                txtMainMenuDriverStats.fontSize = cityCount >= 3 ? 36 : 44; // Scale font cleanly when 3+ cities are installed
+                txtMainMenuDriverStats.fontSize = cityCount >= 3 ? 18 : 22; // Scale font cleanly when 3+ cities are installed
                 txtMainMenuDriverStats.text = MM2PlayerManager.GetDriverDetailedStatsText();
                 if (txtMainMenuBottomHelp != null)
                 {
@@ -1586,7 +1994,7 @@ namespace MM2.UI
                 string cityDisplay = (cSpec != null && !string.IsNullOrEmpty(cSpec.DisplayName)) ? cSpec.DisplayName : cityCode;
                 string modeName = recModes[Mathf.Clamp(modeIdx, 0, recModes.Length - 1)];
 
-                txtMainMenuDriverStats.fontSize = 40; // 20pt effective
+                txtMainMenuDriverStats.fontSize = 20;
                 txtMainMenuDriverStats.text = MM2PlayerManager.GetDriverRaceRecordsSummaryText(
                     cityCode,
                     modeName
@@ -1600,7 +2008,7 @@ namespace MM2.UI
             }
             else
             {
-                txtMainMenuDriverStats.fontSize = 60; // 30pt effective
+                txtMainMenuDriverStats.fontSize = 30;
                 txtMainMenuDriverStats.text = MM2PlayerManager.GetDriverOverviewText();
                 if (txtMainMenuBottomHelp != null)
                 {
@@ -3009,7 +3417,7 @@ namespace MM2.UI
             SetTopLeftRect(go.GetComponent<RectTransform>(), x, y, w, h);
             Text txt = go.AddComponent<Text>();
             txt.font = fontUIExtraBold;
-            txt.fontStyle = FontStyle.Bold;
+            txt.fontStyle = FontStyle.Normal;
             txt.fontSize = fontSize;
             txt.alignment = TextAnchor.UpperLeft;
             txt.color = color;
@@ -3612,27 +4020,18 @@ namespace MM2.UI
             Image rowHit = chkRow.AddComponent<Image>();
             rowHit.color = new Color(0f, 0f, 0f, 0f);
 
-            GameObject chkBox = CreateSlicedBox("Box_LiveUiCheckbox", chkRow.transform, spBoxNavy9, 0f, 6f, 52f, 52f);
-            chkBox.GetComponent<Image>().raycastTarget = false;
-
-            if (spCcSmChk != null)
-            {
-                imgLiveUiCheckTick = CreateSpriteImage("Img_CheckTick", chkBox.transform, spCcSmChk, 9f, 9f, 34f, 34f);
-                imgLiveUiCheckTick.raycastTarget = false;
-            }
-            txtLiveUiCheckMark = CreateShadowLabel(
-                "Txt_CheckMark",
-                chkBox.transform,
-                "✓",
+            imgLiveUiCheckboxBox = CreateSpriteImage(
+                "Box_LiveUiCheckbox",
+                chkRow.transform,
+                MM2GameSession.EnableLiveMenuBackground ? spCheckboxCheckedGreen : spCheckboxUnchecked,
                 0f,
-                0f,
+                6f,
                 52f,
-                52f,
-                34,
-                TextAnchor.MiddleCenter,
-                new Color32(40, 245, 75, 255),
-                fontUIExtraBold
+                52f
             );
+            imgLiveUiCheckboxBox.raycastTarget = false;
+            imgLiveUiCheckTick = null;
+            txtLiveUiCheckMark = null;
 
             CreateShadowLabel(
                 "Lbl_LiveUiCheckbox",
@@ -3696,22 +4095,22 @@ namespace MM2.UI
                       "https://openfontlicense.org";
 
                 string helpDocument =
-                    "OPEN MADNESS\n" +
-                    "--------------------------------------------------------------------------------\n" +
+                    "<size=28><color=#FFE818>OPEN MADNESS</color></size>\n" +
+                    "<color=#4882EB>────────────────────────────────────────────────────────────────────────────────</color>\n" +
                     "Open Madness is an independent, clean-room open-source game engine reimplementation built in Unity that reads cities, vehicles, race missions, physics tuning, and audio directly from user-supplied (.ar) archive files.\n\n\n" +
-                    "LEGAL & TRADEMARK DISCLAIMER\n" +
-                    "--------------------------------------------------------------------------------\n" +
+                    "<size=28><color=#FFE818>LEGAL & TRADEMARK DISCLAIMER</color></size>\n" +
+                    "<color=#4882EB>────────────────────────────────────────────────────────────────────────────────</color>\n" +
                     "Open Madness is an independent community project and is NOT affiliated with, endorsed by, or sponsored by Microsoft Corporation, Angel Studios, or any vehicle manufacturers.\n\n" +
                     "NO original game assets, textures, 3D models, audio files, or (.ar) archives are included with this distribution. You must own a legitimate copy of Midtown Madness 2 (or Midtown Madness 1) and supply your own (.ar) archive files to play original content.\n\n\n" +
-                    "SETUP INSTRUCTIONS (REQUIRED .AR FILES)\n" +
-                    "--------------------------------------------------------------------------------\n" +
+                    "<size=28><color=#FFE818>SETUP INSTRUCTIONS (REQUIRED .AR FILES)</color></size>\n" +
+                    "<color=#4882EB>────────────────────────────────────────────────────────────────────────────────</color>\n" +
                     "1. Locate the 'resources/' folder next to the OpenMadness executable.\n" +
                     "2. Copy your original Midtown Madness 2 (.ar) archive files into 'resources/':\n" +
                     "   • mm2core.ar, mm2tex.ar, mm2aud.ar, mm2audex.ar (plus any city/vehicle .ar files)\n" +
                     "3. (Optional) Copy Midtown Madness 1 archives (core.ar, ui.ar, audio.ar) or community mod (.ar) packages into 'resources/' to load additional cities and vehicles.\n" +
                     "4. Player profiles and race records are stored in 'resources/players/' and are created automatically on first launch.\n\n\n" +
-                    "DRIVING & MENU CONTROLS\n" +
-                    "--------------------------------------------------------------------------------\n" +
+                    "<size=28><color=#FFE818>DRIVING & MENU CONTROLS</color></size>\n" +
+                    "<color=#4882EB>────────────────────────────────────────────────────────────────────────────────</color>\n" +
                     "• Throttle / Brake & Reverse:   Up / Down Arrows  or  W / S\n" +
                     "• Steer Left / Right:           Left / Right Arrows  or  A / D\n" +
                     "• Handbrake:                    Spacebar\n" +
@@ -3721,36 +4120,37 @@ namespace MM2.UI
                     "• Look Back / Left / Right:     NumPad / Look Keys\n" +
                     "• Toggle HUD / Minimap:         Tab / M\n" +
                     "• Pause / Return to Menu:       Escape\n\n\n" +
-                    "THIRD-PARTY OPEN SOURCE NOTICES\n" +
-                    "--------------------------------------------------------------------------------\n" +
+                    "<size=28><color=#FFE818>THIRD-PARTY OPEN SOURCE NOTICES</color></size>\n" +
+                    "<color=#4882EB>────────────────────────────────────────────────────────────────────────────────</color>\n" +
                     "Open Sans Font Family (v3.003)\n" +
                     "Files: OpenSans-Bold.ttf, OpenSans-ExtraBold.ttf, OpenSans-ExtraBoldItalic.ttf, OpenSans-CondensedExtraBold.ttf\n\n" +
-                    oflLicenseText;
+                    "<size=21><color=#C3D0E8>" + oflLicenseText + "</color></size>";
 
                 float padX = 28f;
                 float padY = 20f;
                 float textW = Mathf.Max(400f, contentInnerW - padX * 2f);
 
-                Text txtBody = CreateShadowLabel(
-                    "Txt_HelpScrollBody",
-                    contentRect,
-                    helpDocument,
-                    padX,
-                    padY,
-                    textW,
-                    2200f,
-                    24,
-                    TextAnchor.UpperLeft,
-                    new Color32(235, 240, 250, 255),
-                    fontUIBold,
-                    wordWrap: true
-                );
+                // Plain 1-quad-per-character UI.Text (with Rich Text enabled and no 10x outline mesh multiplier)
+                GameObject txtGo = CreateUIObject("Txt_HelpScrollBody", contentRect);
+                SetTopLeftRect(txtGo.GetComponent<RectTransform>(), padX, padY, textW, 2200f);
 
-                // Measure rendered text height (accounting for 0.5x crisp text scale) so the ScrollRect scrolls the full document cleanly
-                Canvas.ForceUpdateCanvases();
-                float measuredHeight = (txtBody.preferredHeight * 0.5f) + padY * 2f + 40f;
-                float finalContentH = Mathf.Max(boxH - 28f, measuredHeight);
-                txtBody.rectTransform.sizeDelta = new Vector2(textW * 2f, finalContentH * 2f);
+                Text txtBody = txtGo.AddComponent<Text>();
+                txtBody.font = fontUIBold;
+                txtBody.fontStyle = FontStyle.Normal;
+                txtBody.fontSize = 23;
+                txtBody.alignment = TextAnchor.UpperLeft;
+                txtBody.color = new Color32(235, 240, 250, 255);
+                txtBody.supportRichText = true;
+                txtBody.horizontalOverflow = HorizontalWrapMode.Wrap;
+                txtBody.verticalOverflow = VerticalWrapMode.Overflow;
+                txtBody.raycastTarget = false;
+                txtBody.text = helpDocument;
+
+                Vector2 genExtents = new Vector2(textW, 0f);
+                TextGenerationSettings settings = txtBody.GetGenerationSettings(genExtents);
+                float measuredHeight = txtBody.cachedTextGeneratorForLayout.GetPreferredHeight(helpDocument, settings) / Mathf.Max(0.01f, txtBody.pixelsPerUnit);
+                float finalContentH = Mathf.Max(boxH - 28f, measuredHeight + padY * 2f + 32f);
+                txtBody.rectTransform.sizeDelta = new Vector2(textW, finalContentH);
                 contentRect.sizeDelta = new Vector2(contentInnerW, finalContentH);
                 helpScrollRect.verticalNormalizedPosition = 1f;
             }
@@ -3948,14 +4348,17 @@ namespace MM2.UI
             }
 
             bool liveOn = MM2GameSession.EnableLiveMenuBackground;
-            bool useSprite = liveOn && spCcSmChk != null;
+            if (imgLiveUiCheckboxBox != null)
+            {
+                imgLiveUiCheckboxBox.sprite = liveOn ? spCheckboxCheckedGreen : spCheckboxUnchecked;
+            }
             if (imgLiveUiCheckTick != null)
             {
-                imgLiveUiCheckTick.gameObject.SetActive(useSprite);
+                imgLiveUiCheckTick.gameObject.SetActive(false);
             }
             if (txtLiveUiCheckMark != null)
             {
-                txtLiveUiCheckMark.gameObject.SetActive(liveOn && !useSprite);
+                txtLiveUiCheckMark.gameObject.SetActive(false);
             }
         }
 
@@ -4110,7 +4513,7 @@ namespace MM2.UI
                 txtRt.offsetMax = new Vector2(-20f, -8f);
                 Text valTxt = textGo.AddComponent<Text>();
                 valTxt.font = fontUIBold;
-                valTxt.fontStyle = FontStyle.Bold;
+                valTxt.fontStyle = FontStyle.Normal;
                 valTxt.fontSize = 32;
                 valTxt.alignment = TextAnchor.MiddleLeft;
                 valTxt.color = new Color32(255, 240, 20, 255);
@@ -4252,25 +4655,16 @@ namespace MM2.UI
 
             float boxSize = Mathf.Min(38f, h - 4f);
             float boxY = (h - boxSize) * 0.5f;
-            GameObject chkBox = CreateSlicedBox("Box", rowGo.transform, spBoxNavy9 != null ? spBoxNavy9 : spBoxBlack9, 0f, boxY, boxSize, boxSize);
-            chkBox.GetComponent<Image>().raycastTarget = false;
-
-            if (isChecked)
-            {
-                CreateShadowLabel(
-                    "Mark",
-                    chkBox.transform,
-                    "X",
-                    0f,
-                    0f,
-                    boxSize,
-                    boxSize,
-                    24,
-                    TextAnchor.MiddleCenter,
-                    new Color32(72, 130, 255, 255),
-                    fontUIExtraBold
-                );
-            }
+            Image chkBoxImg = CreateSpriteImage(
+                "Box",
+                rowGo.transform,
+                isChecked ? spCheckboxCheckedGreen : spCheckboxUnchecked,
+                0f,
+                boxY,
+                boxSize,
+                boxSize
+            );
+            chkBoxImg.raycastTarget = false;
 
             CreateShadowLabel(
                 "Label",
@@ -6258,37 +6652,15 @@ namespace MM2.UI
             float h
         )
         {
-            // Render at 2x DPI and scale by 0.5 for razor-sharp display typography
+            // Render at 1:1 native CanvasScaler resolution with FontStyle.Normal on OpenSans-ExtraBoldItalic
+            // so FreeType rasterizes exact 1:1 screen-pixel glyphs without synthetic double-slant/embolden distortion
             GameObject go = CreateUIObject(name, parent);
-            RectTransform rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0f, 1f);
-            rt.anchorMax = new Vector2(0f, 1f);
-            rt.pivot = new Vector2(0f, 1f);
-            rt.anchoredPosition = new Vector2(x, -y);
-            rt.sizeDelta = new Vector2(w * 2f, h * 2f);
-            rt.localScale = new Vector3(0.5f, 0.5f, 1f);
-
-            if (!suppressResponsiveRegistration)
-            {
-                var entry = new ResponsiveRectEntry
-                {
-                    BaseX = x,
-                    BaseY = y,
-                    BaseW = w,
-                    BaseH = h,
-                    IsHalfScaleText = true
-                };
-                responsiveRects[rt] = entry;
-                if (lastResponsiveCanvasSize.x >= 100f && lastResponsiveCanvasSize.y >= 100f)
-                {
-                    ApplySingleResponsiveRect(rt, entry, lastResponsiveCanvasSize.x, lastResponsiveCanvasSize.y);
-                }
-            }
+            SetTopLeftRect(go.GetComponent<RectTransform>(), x, y, w, h);
 
             Text txt = go.AddComponent<Text>();
             txt.font = fontHeaderItalic;
-            txt.fontStyle = FontStyle.BoldAndItalic;
-            txt.fontSize = 144; // 72pt effective
+            txt.fontStyle = FontStyle.Normal;
+            txt.fontSize = 72;
             txt.alignment = TextAnchor.MiddleLeft;
             txt.color = new Color32(255, 232, 16, 255); // Classic MM2 gold-yellow
             txt.text = content;
@@ -6296,18 +6668,9 @@ namespace MM2.UI
             txt.verticalOverflow = VerticalWrapMode.Overflow;
             txt.raycastTarget = false;
 
-            // Inner warm red-orange rim + outer dark black outline + drop shadow
-            Outline innerRim = go.AddComponent<Outline>();
-            innerRim.effectColor = new Color32(195, 45, 5, 255);
-            innerRim.effectDistance = new Vector2(3.5f, -3.5f);
-
-            Outline outerOutline = go.AddComponent<Outline>();
-            outerOutline.effectColor = new Color32(8, 8, 28, 255);
-            outerOutline.effectDistance = new Vector2(6f, -6f);
-
-            Shadow sh = go.AddComponent<Shadow>();
-            sh.effectColor = new Color(0f, 0f, 0f, 0.88f);
-            sh.effectDistance = new Vector2(8f, -8f);
+            // Smooth multi-ring radial outline + warm orange-red bevel rim + feathered drop shadow
+            MM2SmoothTextEffect fx = go.AddComponent<MM2SmoothTextEffect>();
+            fx.IsHeaderStyle = true;
 
             return txt;
         }
@@ -6327,32 +6690,9 @@ namespace MM2.UI
             bool? wordWrap = null
         )
         {
-            // Render at 2x font size with 0.5x scale so Unity's dynamic font atlas rasterizes crisp high-DPI glyphs
+            // Render at 1:1 native CanvasScaler resolution so Unity's dynamic font atlas maps 1 texel = 1 physical pixel
             GameObject go = CreateUIObject(name, parent);
-            RectTransform rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = new Vector2(0f, 1f);
-            rt.anchorMax = new Vector2(0f, 1f);
-            rt.pivot = new Vector2(0f, 1f);
-            rt.anchoredPosition = new Vector2(x, -y);
-            rt.sizeDelta = new Vector2(w * 2f, h * 2f);
-            rt.localScale = new Vector3(0.5f, 0.5f, 1f);
-
-            if (!suppressResponsiveRegistration)
-            {
-                var entry = new ResponsiveRectEntry
-                {
-                    BaseX = x,
-                    BaseY = y,
-                    BaseW = w,
-                    BaseH = h,
-                    IsHalfScaleText = true
-                };
-                responsiveRects[rt] = entry;
-                if (lastResponsiveCanvasSize.x >= 100f && lastResponsiveCanvasSize.y >= 100f)
-                {
-                    ApplySingleResponsiveRect(rt, entry, lastResponsiveCanvasSize.x, lastResponsiveCanvasSize.y);
-                }
-            }
+            SetTopLeftRect(go.GetComponent<RectTransform>(), x, y, w, h);
 
             // Pick the matching font weight automatically if not overridden:
             // - Yellow value/description text uses bold regular-width fontUIBold
@@ -6368,8 +6708,8 @@ namespace MM2.UI
 
             Text txt = go.AddComponent<Text>();
             txt.font = targetFont;
-            txt.fontStyle = FontStyle.Bold;
-            txt.fontSize = fontSize * 2;
+            txt.fontStyle = FontStyle.Normal;
+            txt.fontSize = fontSize;
             txt.alignment = align;
             txt.color = color;
             txt.text = content;
@@ -6377,13 +6717,12 @@ namespace MM2.UI
             txt.verticalOverflow = VerticalWrapMode.Overflow;
             txt.raycastTarget = false;
 
-            Outline ol = go.AddComponent<Outline>();
-            ol.effectColor = new Color(0f, 0f, 0f, 0.78f);
-            ol.effectDistance = new Vector2(2f, -2f);
-
-            Shadow sh = go.AddComponent<Shadow>();
-            sh.effectColor = new Color(0f, 0f, 0f, 0.90f);
-            sh.effectDistance = new Vector2(4f, -4f);
+            MM2SmoothTextEffect fx = go.AddComponent<MM2SmoothTextEffect>();
+            fx.IsHeaderStyle = false;
+            fx.OutlineRadius = 1.25f;
+            fx.OutlineColor = new Color32(0, 0, 0, 96);
+            fx.ShadowOffset = new Vector2(2.0f, -2.0f);
+            fx.ShadowColor = new Color32(0, 0, 0, 175);
 
             return txt;
         }
