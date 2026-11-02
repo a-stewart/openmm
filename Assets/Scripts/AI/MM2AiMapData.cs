@@ -442,11 +442,18 @@ namespace MM2.AI
                 aiData.PopulateDefaultAmbients();
             }
 
-            // 2. Parse race/<raceDir>/<raceName>.aimap if available
+            // 2. Parse race/<raceDir>/<raceName>.aimap_p (for Pro profiles) or .aimap if available
             if (!string.IsNullOrEmpty(raceDir) && !string.IsNullOrEmpty(raceName))
             {
-                string raceAimapPath = $"race/{raceDir}/{raceName}.aimap";
-                string raceAimapText = MM2ArchiveSystem.ReadFileText(raceAimapPath);
+                string raceAimapText = null;
+                if (MM2PlayerManager.IsActiveProfilePro())
+                {
+                    raceAimapText = MM2ArchiveSystem.ReadFileText($"race/{raceDir}/{raceName}.aimap_p");
+                }
+                if (string.IsNullOrEmpty(raceAimapText))
+                {
+                    raceAimapText = MM2ArchiveSystem.ReadFileText($"race/{raceDir}/{raceName}.aimap");
+                }
                 if (!string.IsNullOrEmpty(raceAimapText))
                 {
                     aiData.ParseRaceAimap(raceAimapText, raceDir);
@@ -1270,10 +1277,11 @@ namespace MM2.AI
                 int recordSize = 168 + nSec * (100 + 16 * (nLanes + nSw));
                 if (recordSize <= 0 || pos + recordSize > data.Length) break;
 
+                ushort controlType = BitConverter.ToUInt16(data, pos + 10);
+                bool isDivided = BitConverter.ToUInt16(data, pos + 16) != 0;
+                int blockedFlag = BitConverter.ToUInt16(data, pos + 22);
                 float speedLimit = BitConverter.ToSingle(data, pos + 28);
                 int twinPathId = BitConverter.ToInt32(data, pos + 64);
-                int stopLightType = BitConverter.ToInt32(data, pos + 68);
-                int blockedFlag = BitConverter.ToInt32(data, pos + 72);
 
                 int arrOff = pos + 76 + 4 * (nLanes + nSw + 1) * nSec;
                 int endIntersectionId = BitConverter.ToInt32(data, arrOff);
@@ -1335,8 +1343,8 @@ namespace MM2.AI
                 }
 
                 bool isOneWay = twinPathId < 0;
-                bool hasTrafficLight = stopLightType == 1;
-                bool hasStopSign = stopLightType == 5;
+                bool hasTrafficLight = controlType == 1 || controlType == 3;
+                bool hasStopSign = controlType == 0;
 
                 BaiDirectedRoad road = CreateDirectedRoad(
                     blockedFlag == 0 ? DirectedRoads.Count : (10000 + RaceDirectedRoads.Count),
@@ -1348,7 +1356,7 @@ namespace MM2.AI
                     hasTrafficLight,
                     hasStopSign,
                     0f,
-                    false,
+                    isDivided,
                     isOneWay,
                     drivingLanes,
                     upNormals,
@@ -1410,13 +1418,14 @@ namespace MM2.AI
             for (int r = 0; r < RaceDirectedRoads.Count; r++)
             {
                 BaiDirectedRoad road = RaceDirectedRoads[r];
-                if (road.IsContraflowForRacing && DirectedRoads.Count > 0) continue;
-
                 int sId = road.StartIntersectionId;
                 if (sId >= 0 && sId < numIntersections)
                 {
-                    sumPosByInt[sId] += road.StartPosition;
-                    countByInt[sId]++;
+                    if (!road.IsContraflowForRacing || countByInt[sId] == 0)
+                    {
+                        sumPosByInt[sId] += road.StartPosition;
+                        countByInt[sId]++;
+                    }
                     if (!connPathsByInt[sId].Contains(road.PathId))
                     {
                         connPathsByInt[sId].Add(road.PathId);
@@ -1426,8 +1435,11 @@ namespace MM2.AI
                 int eId = road.EndIntersectionId;
                 if (eId >= 0 && eId < numIntersections)
                 {
-                    sumPosByInt[eId] += road.EndPosition;
-                    countByInt[eId]++;
+                    if (!road.IsContraflowForRacing || countByInt[eId] == 0)
+                    {
+                        sumPosByInt[eId] += road.EndPosition;
+                        countByInt[eId]++;
+                    }
                     if (!connPathsByInt[eId].Contains(road.PathId))
                     {
                         connPathsByInt[eId].Add(road.PathId);
@@ -2462,11 +2474,13 @@ namespace MM2.AI
                         }
                         else
                         {
-                            // Checkpoint gate normal is collinear with the street axis up to ±180° symmetry;
-                            // reject perpendicular cross-streets (|dot| < 0.35).
+                            // MM2 checkpoint arches are collinear with the street axis up to ±180° symmetry;
+                            // MM1 waypoints.csv checkpoints are unoriented flare/intersection markers that often
+                            // leave column 3 yaw at 0° on East-West streets, so never hard-reject a road that passes
+                            // directly through the checkpoint position.
                             float absDot = Mathf.Abs(dot);
-                            if (absDot < 0.35f) continue;
-                            alignPenalty = (1f - absDot) * 180f;
+                            if (absDot < 0.35f && horizSq > 81f) continue;
+                            alignPenalty = (1f - absDot) * (horizSq <= 81f ? 35f : 180f);
                         }
                     }
 

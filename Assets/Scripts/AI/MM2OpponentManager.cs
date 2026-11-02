@@ -430,25 +430,35 @@ namespace MM2.AI
             else
             {
                 VehicleSpec oppSpec = VehicleCatalog.GetSpec(pkgName);
-                float oppTransHighMph = (oppSpec != null && oppSpec.CarSim != null && oppSpec.CarSim.TransHigh > 30f)
-                    ? oppSpec.CarSim.TransHigh
-                    : 85f;
-                float oppCruiseMs = Mathf.Clamp(oppTransHighMph * MphToMs * 0.94f, 27.0f, 42.0f);
+                float oppTopMph = 105f;
+                if (oppSpec != null && oppSpec.CarSim != null && oppSpec.CarSim.TransHigh > 30f)
+                {
+                    float redlineRatio = (oppSpec.CarSim.EngineOptRPM > 500f && oppSpec.CarSim.EngineMaxRPM > oppSpec.CarSim.EngineOptRPM)
+                        ? Mathf.Clamp(oppSpec.CarSim.EngineMaxRPM / oppSpec.CarSim.EngineOptRPM, 1.05f, 1.25f)
+                        : 1.15f;
+                    oppTopMph = oppSpec.CarSim.TransHigh * redlineRatio;
+                }
+                else if (oppSpec != null && oppSpec.TopSpeedMph > 45f)
+                {
+                    oppTopMph = oppSpec.TopSpeedMph;
+                }
 
-                float playerCruiseMs = 37.0f;
+                float oppCruiseMs = Mathf.Clamp(oppTopMph * MphToMs * 0.88f, 30.0f, 44.5f);
+
+                float playerCruiseMs = 38.5f;
                 if (playerTransform != null)
                 {
                     ArcadeVehicleController playerCar = playerTransform.GetComponent<ArcadeVehicleController>();
                     if (playerCar != null && playerCar.maxSpeedMph > 35f)
                     {
-                        playerCruiseMs = Mathf.Clamp(playerCar.maxSpeedMph * MphToMs * 0.88f, 26.5f, 42.0f);
+                        playerCruiseMs = Mathf.Clamp(playerCar.maxSpeedMph * MphToMs * 0.90f, 29.0f, 44.5f);
                     }
                 }
 
-                float refTopMs = Mathf.Min(oppCruiseMs, playerCruiseMs * 1.03f);
-                float topMult = def != null ? Mathf.Clamp(def.TopSpeedMultiplier, 0.92f, 1.08f) : 1.0f;
-                float profileMult = MM2PlayerManager.IsActiveProfilePro() ? 1.0f : 0.95f;
-                opp.BaseTopSpeed = Mathf.Clamp(refTopMs * topMult * skillSpread * profileMult, 25.0f, 42.5f);
+                float refTopMs = Mathf.Min(oppCruiseMs, playerCruiseMs * 1.04f);
+                float topMult = def != null ? Mathf.Clamp(def.TopSpeedMultiplier, 0.93f, 1.08f) : 1.0f;
+                float profileMult = MM2PlayerManager.IsActiveProfilePro() ? 1.0f : 0.96f;
+                opp.BaseTopSpeed = Mathf.Clamp(refTopMs * topMult * skillSpread * profileMult, 28.0f, 44.5f);
             }
 
             // Spread lateral racing line offsets slightly so opponents don't drive single-file;
@@ -903,7 +913,7 @@ namespace MM2.AI
             float rubberBandMult = 1f;
             float throttleScale = isCrashCourse
                 ? 1.0f
-                : Mathf.Lerp(0.84f, 1.0f, Mathf.InverseLerp(0.55f, 1.0f, opp.MaxThrottle));
+                : Mathf.Lerp(0.91f, 1.0f, Mathf.InverseLerp(0.45f, 1.0f, opp.MaxThrottle));
 
             if (isCrashCourse && playerTransform != null && !opp.HasFinished)
             {
@@ -946,9 +956,12 @@ namespace MM2.AI
                 }
             }
 
+            float baseRouteSpeed = isCrashCourse
+                ? routeSpeedLimit
+                : Mathf.Min(routeSpeedLimit, opp.BaseTopSpeed * throttleScale);
             float desiredSpeed = opp.HasFinished
                 ? 12f
-                : (routeSpeedLimit * throttleScale * rubberBandMult);
+                : (baseRouteSpeed * rubberBandMult);
 
             // 3. Check for slower vehicles ahead and adjust lateral offset to overtake cleanly
             float targetLatOffset = opp.PreferredLateralOffset;
@@ -967,8 +980,8 @@ namespace MM2.AI
             opp.IsBraking = opp.CurrentSpeed > desiredSpeed + 1.6f;
             if (opp.CurrentSpeed < desiredSpeed)
             {
-                float maxAccel = isCrashCourse ? 6.8f : (7.6f * Mathf.Clamp(opp.MaxThrottle, 0.80f, 1.05f));
-                float highSpeedAccel = isCrashCourse ? 4.4f : (4.8f * Mathf.Clamp(opp.MaxThrottle, 0.80f, 1.05f));
+                float maxAccel = isCrashCourse ? 6.8f : (8.2f * Mathf.Clamp(opp.MaxThrottle, 0.85f, 1.05f));
+                float highSpeedAccel = isCrashCourse ? 4.4f : (5.2f * Mathf.Clamp(opp.MaxThrottle, 0.85f, 1.05f));
                 float accel = Mathf.Lerp(maxAccel, highSpeedAccel, Mathf.Clamp01(opp.CurrentSpeed / Mathf.Max(22f, opp.BaseTopSpeed)));
                 opp.CurrentSpeed = Mathf.MoveTowards(opp.CurrentSpeed, desiredSpeed, accel * dt);
             }

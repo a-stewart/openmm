@@ -68,12 +68,15 @@ namespace MM2.AI
         public float StuckTimer;
         public float ReverseRecoveryTimer;
         public float ReverseSteerSign = 1f;
+        public Vector3 ImpactPerturbationVelocity;
+        public float ImpactRecoveryTimer;
         public bool IsBraking;
 
         private void OnCollisionEnter(Collision collision)
         {
             if (collision == null || collision.rigidbody == null) return;
-            if (collision.relativeVelocity.sqrMagnitude < 4f) return;
+            float impactMag = collision.relativeVelocity.magnitude;
+            if (impactMag < 2f) return;
 
             // Any vehicle hitting a cop immediately triggers pursuit of that vehicle!
             if (State != MM2PoliceState.Pursuit)
@@ -83,6 +86,26 @@ namespace MM2.AI
                 TargetRigidbody = collision.rigidbody;
                 PursuitLostTimer = 0f;
             }
+
+            // Apply realistic impact speed loss and recoil away from the struck vehicle
+            // so police cars don't act like unstoppable battering rams on contact.
+            Vector3 pushAway = transform.position - collision.rigidbody.position;
+            pushAway.y = 0f;
+            if (pushAway.sqrMagnitude > 0.001f)
+            {
+                pushAway.Normalize();
+            }
+            else
+            {
+                pushAway = -transform.forward;
+            }
+
+            ImpactPerturbationVelocity = Vector3.ClampMagnitude(
+                ImpactPerturbationVelocity + pushAway * Mathf.Clamp(impactMag * 0.35f, 1.5f, 7.5f),
+                9f
+            );
+            ImpactRecoveryTimer = Mathf.Clamp(impactMag * 0.14f, 0.50f, 1.40f);
+            CurrentSpeed = Mathf.Max(0f, CurrentSpeed - Mathf.Max(4f, impactMag * 0.70f));
         }
     }
 
@@ -199,18 +222,26 @@ namespace MM2.AI
                 ? 1f
                 : Mathf.Clamp01(MM2GameSession.CopDensity / 100f);
 
-            float playerTopSpeedMs = 36f;
+            float playerRefMph = 80f;
             if (playerTransform != null)
             {
                 ArcadeVehicleController playerCar = playerTransform.GetComponent<ArcadeVehicleController>();
-                if (playerCar != null && playerCar.maxSpeedMph > 35f)
+                if (playerCar != null)
                 {
-                    playerTopSpeedMs = playerCar.maxSpeedMph * 0.44704f;
+                    if (playerCar.carSimConfig != null && playerCar.carSimConfig.TransHigh > 30f)
+                    {
+                        playerRefMph = playerCar.carSimConfig.TransHigh;
+                    }
+                    else if (playerCar.maxSpeedMph > 35f)
+                    {
+                        playerRefMph = playerCar.maxSpeedMph / 1.2f;
+                    }
                 }
             }
+            float playerRefSpeedMs = playerRefMph * 0.44704f;
             float targetPursuitSpeed = isCrashCourse
-                ? Mathf.Clamp(playerTopSpeedMs * 0.80f, 24.5f, 28.5f)
-                : Mathf.Clamp(playerTopSpeedMs * 0.92f, 28.5f, 36.5f);
+                ? Mathf.Clamp(playerRefSpeedMs * 0.48f, 18.5f, 22.0f)
+                : Mathf.Clamp(playerRefSpeedMs * 0.78f, 25.0f, 33.0f);
 
             // 1. Spawn race-specific [Police] placements from <race>.aimap
             if (aiMap.PoliceSpawns.Count > 0)
@@ -234,7 +265,9 @@ namespace MM2.AI
                     cop.HomePosition = snappedHomePos;
                     cop.HomeRotation = alignedRot;
                     cop.MaxPursuitSpeed = targetPursuitSpeed;
-                    cop.DetectRadius = Mathf.Clamp(def.DetectRadius, 48f, 110f);
+                    cop.DetectRadius = isCrashCourse
+                        ? Mathf.Clamp(def.DetectRadius * 0.72f, 30f, 40f)
+                        : Mathf.Clamp(def.DetectRadius, 48f, 95f);
                     cop.State = MM2PoliceState.StationaryWatch;
 
                     Vector3 spawnPos = cop.HomePosition + roadUp * cop.GroundClearanceOffset;
@@ -307,6 +340,8 @@ namespace MM2.AI
                 cop.PursuitLostTimer = 0f;
                 cop.StuckTimer = 0f;
                 cop.ReverseRecoveryTimer = 0f;
+                cop.ImpactPerturbationVelocity = Vector3.zero;
+                cop.ImpactRecoveryTimer = 0f;
                 cop.TargetTransform = null;
                 cop.TargetRigidbody = null;
                 cop.PlannedRoute.Clear();
@@ -543,13 +578,29 @@ namespace MM2.AI
                     float playerSpeed = playerRigidbody != null ? playerRigidbody.linearVelocity.magnitude : 0f;
                     bool isCrashCourse = string.Equals(MM2GameSession.SelectedGameMode, "CrashCourse", StringComparison.OrdinalIgnoreCase);
                     bool isRaceMode = !string.Equals(MM2GameSession.SelectedGameMode, "Cruise", StringComparison.OrdinalIgnoreCase);
-                    float speedThreshold = isCrashCourse ? 1.0f : (isRaceMode ? 11.5f : (aiMap.DefaultSpeedLimit + 3.0f));
+                    float speedThreshold = isCrashCourse ? 3.5f : (isRaceMode ? 11.5f : (aiMap.DefaultSpeedLimit + 3.0f));
 
-                    if (playerSpeed >= speedThreshold || (dSq < 18f * 18f && playerSpeed > 7f))
+                    // Check if a building/wall blocks direct line of sight so cops parked on a parallel
+                    // street behind a city block don't wake up early and ambush the player at intersections
+                    bool blockedByBuilding = false;
+                    Vector3 eyeFrom = copPos + Vector3.up * 1.15f;
+                    Vector3 eyeTo = playerTransform.position + Vector3.up * 1.15f;
+                    if (Physics.Linecast(eyeFrom, eyeTo, out RaycastHit losHit, ~0, QueryTriggerInteraction.Ignore))
                     {
-                        triggeredTarget = playerTransform;
-                        triggeredRb = playerRigidbody;
-                        return true;
+                        if (losHit.rigidbody == null && losHit.normal.y < 0.35f)
+                        {
+                            blockedByBuilding = true;
+                        }
+                    }
+
+                    if (!blockedByBuilding || dSq <= 16f * 16f)
+                    {
+                        if (playerSpeed >= speedThreshold || (dSq < 18f * 18f && playerSpeed > 7f))
+                        {
+                            triggeredTarget = playerTransform;
+                            triggeredRb = playerRigidbody;
+                            return true;
+                        }
                     }
                 }
             }
@@ -583,6 +634,8 @@ namespace MM2.AI
             cop.PursuitLostTimer = 0f;
             cop.StuckTimer = 0f;
             cop.ReverseRecoveryTimer = 0f;
+            cop.ImpactPerturbationVelocity = Vector3.zero;
+            cop.ImpactRecoveryTimer = 0f;
             cop.RouteReplanTimer = 0f;
             SetSirenActive(cop, true);
 
@@ -607,16 +660,20 @@ namespace MM2.AI
                 return;
             }
 
+            bool isCrashCourse = string.Equals(MM2GameSession.SelectedGameMode, "CrashCourse", StringComparison.OrdinalIgnoreCase);
+
             Vector3 copPos = cop.transform.position;
             Vector3 targetPos = cop.TargetTransform.position;
             Vector3 toTarget = targetPos - copPos;
             float distToTarget = toTarget.magnitude;
 
             // Check if target has escaped far away for an extended period
-            if (distToTarget > 235f)
+            float loseDist = isCrashCourse ? 115f : 235f;
+            float loseTime = isCrashCourse ? 4.5f : 8f;
+            if (distToTarget > loseDist)
             {
                 cop.PursuitLostTimer += dt;
-                if (cop.PursuitLostTimer > 8f)
+                if (cop.PursuitLostTimer > loseTime)
                 {
                     EndPursuit(cop);
                     return;
@@ -636,8 +693,18 @@ namespace MM2.AI
             if (distToTarget <= 48f)
             {
                 Vector3 targetVel = cop.TargetRigidbody != null ? cop.TargetRigidbody.linearVelocity : Vector3.zero;
-                float leadTime = Mathf.Clamp(distToTarget / Mathf.Max(15f, cop.MaxPursuitSpeed), 0.1f, 0.85f);
+                float leadMax = isCrashCourse ? 0.35f : 0.75f;
+                float leadTime = Mathf.Clamp(distToTarget / Mathf.Max(15f, cop.MaxPursuitSpeed), 0.08f, leadMax);
                 steerGoal = targetPos + targetVel * leadTime;
+
+                if (isCrashCourse && distToTarget < 28f)
+                {
+                    // Pace closing speed relative to the player in Crash Course so pursuers don't
+                    // slam into a slow or cornering player at 2-3x the player's current speed
+                    float targetSpeed = targetVel.magnitude;
+                    float maxClosingBonus = Mathf.Lerp(3.5f, 7.5f, Mathf.Clamp01(distToTarget / 28f));
+                    desiredSpeed = Mathf.Min(desiredSpeed, Mathf.Max(10.5f, targetSpeed + maxClosingBonus));
+                }
             }
             else if (aiMap.DirectedRoads.Count > 0)
             {
@@ -666,20 +733,20 @@ namespace MM2.AI
                         cop.DistanceAlongRoad = Mathf.MoveTowards(cop.DistanceAlongRoad, cop.CurrentRoad.TotalLength, cop.CurrentSpeed * dt);
                     }
 
-                    // Slow down slightly before sharp intersection turns
+                    // Slow down before intersection turns
                     if (cop.PlannedRouteIndex < cop.PlannedRoute.Count)
                     {
                         var nextRoad = cop.PlannedRoute[cop.PlannedRouteIndex];
                         float turnDot = Vector3.Dot(cop.CurrentRoad.EndTangent, nextRoad.StartTangent);
-                        if (turnDot < 0.55f && toEnd.sqrMagnitude < 32f * 32f)
+                        if (turnDot < 0.70f && toEnd.sqrMagnitude < 32f * 32f)
                         {
-                            desiredSpeed = Mathf.Min(desiredSpeed, 21f);
+                            desiredSpeed = Mathf.Min(desiredSpeed, isCrashCourse ? 13.5f : 18.5f);
                         }
                     }
                 }
             }
 
-            DrivePhysicsTowardGoal(cop, steerGoal, desiredSpeed, dt);
+            DrivePhysicsTowardGoal(cop, steerGoal, desiredSpeed, dt, isCrashCourse);
         }
 
         private void UpdatePursuitRoadRoute(MM2PoliceAgent cop, Vector3 copPos, Vector3 targetPos)
@@ -699,7 +766,7 @@ namespace MM2.AI
             }
         }
 
-        private void DrivePhysicsTowardGoal(MM2PoliceAgent cop, Vector3 goalPos, float desiredSpeed, float dt)
+        private void DrivePhysicsTowardGoal(MM2PoliceAgent cop, Vector3 goalPos, float desiredSpeed, float dt, bool isCrashCourse)
         {
             if (cop.Body == null) return;
 
@@ -708,6 +775,17 @@ namespace MM2.AI
             Vector3 horizFwd = new Vector3(tr.forward.x, 0f, tr.forward.z);
             if (horizFwd.sqrMagnitude < 0.0001f) horizFwd = Vector3.forward;
             horizFwd.Normalize();
+
+            if (cop.ImpactRecoveryTimer > 0f)
+            {
+                cop.ImpactRecoveryTimer -= dt;
+                cop.ImpactPerturbationVelocity = Vector3.Lerp(cop.ImpactPerturbationVelocity, Vector3.zero, 5f * dt);
+                desiredSpeed = Mathf.Min(desiredSpeed, 8.5f);
+            }
+            else
+            {
+                cop.ImpactPerturbationVelocity = Vector3.zero;
+            }
 
             // Stuck detection & automatic reverse recovery
             if (cop.ReverseRecoveryTimer > 0f)
@@ -720,21 +798,22 @@ namespace MM2.AI
                 }
 
                 cop.SteerAngleDeg = 26f * cop.ReverseSteerSign;
-                cop.CurrentSpeed = Mathf.MoveTowards(cop.CurrentSpeed, -10.5f, 16f * dt);
-                float revYaw = tr.eulerAngles.y - cop.ReverseSteerSign * 65f * dt;
+                cop.CurrentSpeed = Mathf.MoveTowards(cop.CurrentSpeed, -9.0f, 14f * dt);
+                float revYaw = tr.eulerAngles.y - cop.ReverseSteerSign * 60f * dt;
                 Vector3 revHorizFwd = Quaternion.Euler(0f, revYaw, 0f) * Vector3.forward;
                 Vector3 revNextPos = pos + revHorizFwd * (cop.CurrentSpeed * dt);
 
                 SnapCopToRoadSurface(cop, revNextPos, pos.y, out float revGroundY, out Vector3 revGroundUp);
-                revNextPos.y = Mathf.MoveTowards(pos.y, revGroundY + cop.GroundClearanceOffset, 12f * dt);
+                float revTargetY = revGroundY + cop.GroundClearanceOffset;
 
                 Vector3 revAlignedFwd = Vector3.ProjectOnPlane(revHorizFwd, revGroundUp).normalized;
                 if (revAlignedFwd.sqrMagnitude < 0.001f) revAlignedFwd = revHorizFwd;
                 Quaternion revRot = Quaternion.LookRotation(revAlignedFwd, revGroundUp);
 
-                cop.Body.MovePosition(revNextPos);
                 cop.Body.MoveRotation(Quaternion.Slerp(cop.Body.rotation, revRot, Mathf.Clamp01(14f * dt)));
-                cop.Body.linearVelocity = revAlignedFwd * cop.CurrentSpeed;
+                Vector3 revVel = revAlignedFwd * cop.CurrentSpeed;
+                revVel.y += Mathf.Clamp((revTargetY - pos.y) * 12f, -12f, 12f);
+                cop.Body.linearVelocity = revVel;
                 cop.Body.angularVelocity = Vector3.zero;
                 return;
             }
@@ -784,33 +863,45 @@ namespace MM2.AI
             float steerInput = Mathf.Clamp(signedAngle / 35f + steerBias, -1f, 1f);
             cop.SteerAngleDeg = steerInput * 28f;
 
-            // Reduce target speed when making a hard turn
-            if (Mathf.Abs(signedAngle) > 35f)
+            // Smoothly reduce target speed for turns starting at 12 degrees so cops brake naturally into corners
+            float absAngle = Mathf.Abs(signedAngle);
+            if (absAngle > 12f)
             {
-                desiredSpeed = Mathf.Min(desiredSpeed, 13.5f);
+                float turnT = Mathf.Clamp01((absAngle - 12f) / 38f);
+                float minCornerSpeed = isCrashCourse ? 10.0f : 12.5f;
+                desiredSpeed = Mathf.Min(desiredSpeed, Mathf.Lerp(desiredSpeed, minCornerSpeed, turnT));
             }
 
-            cop.IsBraking = cop.CurrentSpeed > desiredSpeed + 2.2f;
-            float accelRate = cop.IsBraking ? 15f : 7.4f;
+            cop.IsBraking = cop.CurrentSpeed > desiredSpeed + 1.8f;
+            float forwardAccel = isCrashCourse ? 4.6f : 6.0f;
+            float accelRate = cop.IsBraking ? 14f : forwardAccel;
             cop.CurrentSpeed = Mathf.MoveTowards(cop.CurrentSpeed, desiredSpeed, accelRate * dt);
 
             // Apply yaw rotation proportional to speed and steering angle
-            float turnFactor = Mathf.Clamp01(Mathf.Abs(cop.CurrentSpeed) / 4f);
-            float yawRateDeg = steerInput * 115f * turnFactor * Mathf.Sign(cop.CurrentSpeed >= -0.1f ? 1f : -1f);
+            float turnFactor = Mathf.Clamp01(Mathf.Abs(cop.CurrentSpeed) / 4.5f);
+            float maxYawRate = isCrashCourse ? 82f : 96f;
+            float yawRateDeg = steerInput * maxYawRate * turnFactor * Mathf.Sign(cop.CurrentSpeed >= -0.1f ? 1f : -1f);
             float newYaw = tr.eulerAngles.y + yawRateDeg * dt;
             Vector3 newHorizFwd = Quaternion.Euler(0f, newYaw, 0f) * Vector3.forward;
 
-            Vector3 nextPos = pos + newHorizFwd * (cop.CurrentSpeed * dt);
-            SnapCopToRoadSurface(cop, nextPos, pos.y, out float groundY, out Vector3 groundUp);
-            nextPos.y = Mathf.MoveTowards(pos.y, groundY + cop.GroundClearanceOffset, 14f * dt);
+            Vector3 probePos = pos + newHorizFwd * (cop.CurrentSpeed * dt);
+            SnapCopToRoadSurface(cop, probePos, pos.y, out float groundY, out Vector3 groundUp);
+            float targetY = groundY + cop.GroundClearanceOffset;
 
             Vector3 alignedFwd = Vector3.ProjectOnPlane(newHorizFwd, groundUp).normalized;
             if (alignedFwd.sqrMagnitude < 0.001f) alignedFwd = newHorizFwd;
             Quaternion targetRot = Quaternion.LookRotation(alignedFwd, groundUp);
 
-            cop.Body.MovePosition(nextPos);
-            cop.Body.MoveRotation(Quaternion.Slerp(cop.Body.rotation, targetRot, Mathf.Clamp01(14f * dt)));
-            cop.Body.linearVelocity = alignedFwd * cop.CurrentSpeed;
+            // Drive non-kinematic Rigidbody via linearVelocity (do NOT combine MovePosition(pos + vel * dt)
+            // with linearVelocity = vel, which double-integrates velocity and force-teleports into player colliders)
+            if (Mathf.Abs(targetY - pos.y) > 1.8f)
+            {
+                cop.Body.position = new Vector3(pos.x, targetY, pos.z);
+            }
+            cop.Body.MoveRotation(Quaternion.Slerp(cop.Body.rotation, targetRot, Mathf.Clamp01(12f * dt)));
+            Vector3 finalVel = alignedFwd * cop.CurrentSpeed + cop.ImpactPerturbationVelocity;
+            finalVel.y += Mathf.Clamp((targetY - pos.y) * 14f, -14f, 14f);
+            cop.Body.linearVelocity = finalVel;
             cop.Body.angularVelocity = Vector3.zero;
         }
 
@@ -1118,8 +1209,9 @@ namespace MM2.AI
             );
             box.sharedMaterial = copPhysMat;
 
+            bool isCrashCourse = string.Equals(MM2GameSession.SelectedGameMode, "CrashCourse", StringComparison.OrdinalIgnoreCase);
             Rigidbody rb = copGo.AddComponent<Rigidbody>();
-            rb.mass = 1750f;
+            rb.mass = isCrashCourse ? 1050f : 1300f;
             rb.linearDamping = 0.15f;
             rb.angularDamping = 2.2f;
             rb.useGravity = false;

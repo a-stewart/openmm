@@ -75,12 +75,31 @@ namespace MM2.Archive
         public string DropdownLabel;
         public string Description;
         public bool IsExam;
-        public int TimeOfDayIndex;
-        public int WeatherIndex;
-        public int CopDensity;
-        public int TrafficDensity;
-        public int PedestrianDensity;
-        public MM2CrashLessonStage[] Stages;
+
+        public int AmateurTimeOfDayIndex;
+        public int AmateurWeatherIndex;
+        public int AmateurCopDensity;
+        public int AmateurTrafficDensity;
+        public int AmateurPedestrianDensity;
+        public MM2CrashLessonStage[] AmateurStages;
+
+        public int ProTimeOfDayIndex;
+        public int ProWeatherIndex;
+        public int ProCopDensity;
+        public int ProTrafficDensity;
+        public int ProPedestrianDensity;
+        public MM2CrashLessonStage[] ProStages;
+
+        public int TimeOfDayIndex => MM2PlayerManager.IsActiveProfilePro() ? ProTimeOfDayIndex : AmateurTimeOfDayIndex;
+        public int WeatherIndex => MM2PlayerManager.IsActiveProfilePro() ? ProWeatherIndex : AmateurWeatherIndex;
+        public int CopDensity => MM2PlayerManager.IsActiveProfilePro() ? ProCopDensity : AmateurCopDensity;
+        public int TrafficDensity => MM2PlayerManager.IsActiveProfilePro() ? ProTrafficDensity : AmateurTrafficDensity;
+        public int PedestrianDensity => MM2PlayerManager.IsActiveProfilePro() ? ProPedestrianDensity : AmateurPedestrianDensity;
+        public MM2CrashLessonStage[] Stages =>
+            (MM2PlayerManager.IsActiveProfilePro() && ProStages != null && ProStages.Length > 0)
+                ? ProStages
+                : AmateurStages;
+
         public string[] PreRaceClips;
         public string[] WinClips;
         public string[] LoseClips;
@@ -160,12 +179,13 @@ namespace MM2.Archive
         private static bool IsWaterSurfaceTexture(string tName)
         {
             if (string.IsNullOrEmpty(tName)) return false;
-            // Only match deepwater textures from city/materials.csv (s_ocean, s_thames, l3water).
+            // Match deepwater textures from MM2 city/materials.csv (s_ocean, s_thames, l3water) and MM1 deepwater (t_water).
             // Shallow water textures (s_pond, s_water) used on lakes, lagoons, and fountains keep their solid MeshCollider
             // so the player can drive across lakes and ponds without triggering "Sleep with the fishes!".
             return tName.StartsWith("s_ocean", StringComparison.OrdinalIgnoreCase) ||
                    tName.StartsWith("s_thames", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(tName, "l3water", StringComparison.OrdinalIgnoreCase);
+                   string.Equals(tName, "l3water", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(tName, "t_water", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void RecordWaterTriangles(IList<Vector3> positions, IList<int> tris, int baseVertexOffset = 0)
@@ -291,7 +311,8 @@ namespace MM2.Archive
                 {
                     if (IsPointInTriangleXZ(worldPos.x, worldPos.z, wt.A, wt.B, wt.C))
                     {
-                        if (!HasSolidGroundBelow(worldPos, ignoreCollider, triY + 0.25f, 3.2f) &&
+                        float minGroundProbeY = worldPos.y < triY - 1.5f ? (worldPos.y - 2.5f) : (triY + 0.25f);
+                        if (!HasSolidGroundBelow(worldPos, ignoreCollider, minGroundProbeY, 3.2f) &&
                             !HasSolidCeilingAbove(worldPos, ignoreCollider, 14f))
                         {
                             waterSurfaceY = triY;
@@ -689,15 +710,19 @@ namespace MM2.Archive
             string[] cols = lines[targetLine].Split(',');
             if (cols.Length < 10) return fallback;
 
-            // Format: Description(0), CarType(1), TimeofDay(2), Weather(3), Opponents(4), Cops(5), Ambient(6), Peds(7), NumLaps(8), TimeLimit(9), Difficulty(10)
-            int.TryParse(cols[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int tod);
-            int.TryParse(cols[3].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int weath);
-            int.TryParse(cols[4].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int opps);
-            float.TryParse(cols[5].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cops);
-            float.TryParse(cols[6].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float ambient);
-            float.TryParse(cols[7].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float peds);
-            int.TryParse(cols[8].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int laps);
-            float.TryParse(cols[9].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float timeLimit);
+            // Format:
+            // Amateur (cols 1..10): CarType(1), TimeofDay(2), Weather(3), Opponents(4), Cops(5), Ambient(6), Peds(7), NumLaps(8), TimeLimit(9), Difficulty(10)
+            // Pro (cols 11..20):    CarType(11), TimeofDay(12), Weather(13), Opponents(14), Cops(15), Ambient(16), Peds(17), NumLaps(18), TimeLimit(19), Difficulty(20)
+            int colOffset = (MM2PlayerManager.IsActiveProfilePro() && cols.Length >= 20) ? 10 : 0;
+
+            int.TryParse(cols[2 + colOffset].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int tod);
+            int.TryParse(cols[3 + colOffset].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int weath);
+            int.TryParse(cols[4 + colOffset].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int opps);
+            float.TryParse(cols[5 + colOffset].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float cops);
+            float.TryParse(cols[6 + colOffset].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float ambient);
+            float.TryParse(cols[7 + colOffset].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float peds);
+            int.TryParse(cols[8 + colOffset].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int laps);
+            float.TryParse(cols[9 + colOffset].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float timeLimit);
 
             return new MM2RaceMetadata
             {
@@ -995,7 +1020,13 @@ namespace MM2.Archive
                 int copDensity,
                 int trafficDensity,
                 int pedDensity,
-                MM2CrashLessonStage[] stages
+                MM2CrashLessonStage[] stages,
+                int todPro,
+                int weatherPro,
+                int copDensityPro,
+                int trafficDensityPro,
+                int pedDensityPro,
+                MM2CrashLessonStage[] stagesPro
             )>(maxLessons);
 
             var typeTotalCounts = new Dictionary<MM2CrashLessonType, int>
@@ -1024,6 +1055,19 @@ namespace MM2.Archive
                     continue;
                 }
 
+                string stageCsvPro = MM2ArchiveSystem.ReadFileText($"race/{spec.RaceDir}/crash{idx}data_p.csv");
+                if (string.IsNullOrEmpty(stageCsvPro))
+                {
+                    stageCsvPro = MM2ArchiveSystem.ReadFileText($"race/{spec.MapName}/crash{idx}data_p.csv");
+                }
+                MM2CrashLessonStage[] stagesPro = !string.IsNullOrEmpty(stageCsvPro)
+                    ? ParseCrashStageCsv(stageCsvPro)
+                    : Array.Empty<MM2CrashLessonStage>();
+                if (stagesPro.Length == 0)
+                {
+                    stagesPro = stages;
+                }
+
                 string csvName = $"lesson{idx + 1}";
                 string csvExplicitName = null;
                 int tod = 1;
@@ -1031,6 +1075,12 @@ namespace MM2.Archive
                 int copDensity = 0;
                 int trafficDensity = 0;
                 int pedDensity = 0;
+
+                int todPro = 1;
+                int weatherPro = 0;
+                int copDensityPro = 0;
+                int trafficDensityPro = 0;
+                int pedDensityPro = 0;
 
                 if (idx + 1 < metaLines.Length)
                 {
@@ -1058,6 +1108,24 @@ namespace MM2.Archive
                         copDensity = Mathf.Clamp(cops > 1.0f ? Mathf.RoundToInt(cops * 12.5f) : Mathf.RoundToInt(cops * 100f), 0, 100);
                         trafficDensity = Mathf.Clamp(Mathf.RoundToInt(ambient * 100f), 0, 100);
                         pedDensity = Mathf.Clamp(Mathf.RoundToInt(peds * 100f), 0, 100);
+
+                        todPro = tod;
+                        weatherPro = weather;
+                        copDensityPro = copDensity;
+                        trafficDensityPro = trafficDensity;
+                        pedDensityPro = pedDensity;
+                    }
+                    if (mCols.Length >= 18)
+                    {
+                        int.TryParse(mCols[12].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out todPro);
+                        int.TryParse(mCols[13].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out weatherPro);
+                        float.TryParse(mCols[15].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float copsPro);
+                        float.TryParse(mCols[16].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float ambientPro);
+                        float.TryParse(mCols[17].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float pedsPro);
+
+                        copDensityPro = Mathf.Clamp(copsPro > 1.0f ? Mathf.RoundToInt(copsPro * 12.5f) : Mathf.RoundToInt(copsPro * 100f), 0, 100);
+                        trafficDensityPro = Mathf.Clamp(Mathf.RoundToInt(ambientPro * 100f), 0, 100);
+                        pedDensityPro = Mathf.Clamp(Mathf.RoundToInt(pedsPro * 100f), 0, 100);
                     }
                 }
 
@@ -1065,11 +1133,32 @@ namespace MM2.Archive
                 {
                     trafficDensity = stages[0].AmbientDensity;
                 }
+                if (trafficDensityPro == 0 && stagesPro.Length > 0 && stagesPro[0].AmbientDensity > 0)
+                {
+                    trafficDensityPro = stagesPro[0].AmbientDensity;
+                }
 
                 MM2CrashLessonType lType = ClassifyCrashLessonType(csvName);
                 typeTotalCounts[lType] = typeTotalCounts[lType] + 1;
 
-                rawEntries.Add((idx, csvName, csvExplicitName, lType, tod, weather, copDensity, trafficDensity, pedDensity, stages));
+                rawEntries.Add((
+                    idx,
+                    csvName,
+                    csvExplicitName,
+                    lType,
+                    tod,
+                    weather,
+                    copDensity,
+                    trafficDensity,
+                    pedDensity,
+                    stages,
+                    todPro,
+                    weatherPro,
+                    copDensityPro,
+                    trafficDensityPro,
+                    pedDensityPro,
+                    stagesPro
+                ));
             }
 
             // Second pass: build MM2CrashLessonSpec with incremental numbering per prefix type
@@ -1197,12 +1286,18 @@ namespace MM2.Archive
                     DropdownLabel = dropdownLabel,
                     Description = description,
                     IsExam = isExam,
-                    TimeOfDayIndex = Mathf.Clamp(entry.tod, 0, 3),
-                    WeatherIndex = Mathf.Clamp(entry.weather, 0, 3),
-                    CopDensity = entry.copDensity,
-                    TrafficDensity = entry.trafficDensity,
-                    PedestrianDensity = entry.pedDensity,
-                    Stages = entry.stages,
+                    AmateurTimeOfDayIndex = Mathf.Clamp(entry.tod, 0, 3),
+                    AmateurWeatherIndex = Mathf.Clamp(entry.weather, 0, 3),
+                    AmateurCopDensity = entry.copDensity,
+                    AmateurTrafficDensity = entry.trafficDensity,
+                    AmateurPedestrianDensity = entry.pedDensity,
+                    AmateurStages = entry.stages,
+                    ProTimeOfDayIndex = Mathf.Clamp(entry.todPro, 0, 3),
+                    ProWeatherIndex = Mathf.Clamp(entry.weatherPro, 0, 3),
+                    ProCopDensity = entry.copDensityPro,
+                    ProTrafficDensity = entry.trafficDensityPro,
+                    ProPedestrianDensity = entry.pedDensityPro,
+                    ProStages = entry.stagesPro,
                     PreRaceClips = preRaceClips,
                     WinClips = winClips,
                     LoseClips = loseClips
@@ -2942,11 +3037,14 @@ namespace MM2.Archive
                     chunks[gx, gz] = new RuntimeDistrictChunk();
                 }
             }
+            var tunnelSurfaceOverlapChunk = new RuntimeDistrictChunk();
 
             float minX = -1600f, maxX = 1600f, minZ = -1600f, maxZ = 1600f;
             float minVertY = 0f;
 
-            var parsedCells = new List<(Vector3 center, List<MM2RuntimePkgLoader.PkgShaderEntry> mats, List<MM2RuntimePkgLoader.PkgSection> secs)>(cityBmsPaths.Count);
+            var parsedCells = new List<(string path, string cellKey, Vector3 center, Bounds bounds, List<MM2RuntimePkgLoader.PkgShaderEntry> mats, List<MM2RuntimePkgLoader.PkgSection> secs)>(cityBmsPaths.Count);
+            var tunnelCellKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             if (cityBmsPaths.Count > 0)
             {
                 minX = float.MaxValue; maxX = float.MinValue;
@@ -2955,7 +3053,8 @@ namespace MM2.Archive
 
                 for (int f = 0; f < cityBmsPaths.Count; f++)
                 {
-                    byte[] bytes = MM2ArchiveSystem.ReadFileBytes(cityBmsPaths[f]);
+                    string bmsPath = cityBmsPaths[f];
+                    byte[] bytes = MM2ArchiveSystem.ReadFileBytes(bmsPath);
                     if (!MM2RuntimePkgLoader.TryParseBmsMesh(
                             bytes,
                             out Vector3 hdrOff,
@@ -2965,8 +3064,27 @@ namespace MM2.Archive
                         continue;
                     }
 
+                    string cellKey = GetMm1CellKey(bmsPath);
+                    if (mats != null)
+                    {
+                        for (int m = 0; m < mats.Count; m++)
+                        {
+                            string tex = mats[m].TextureName;
+                            if (!string.IsNullOrEmpty(tex) &&
+                                tex.IndexOf("tun_top", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                tunnelCellKeys.Add(cellKey);
+                                break;
+                            }
+                        }
+                    }
+
                     float sumX = 0f, sumZ = 0f;
                     int vTotal = 0;
+                    float cMinX = float.MaxValue, cMaxX = float.MinValue;
+                    float cMinY = float.MaxValue, cMaxY = float.MinValue;
+                    float cMinZ = float.MaxValue, cMaxZ = float.MinValue;
+
                     for (int s = 0; s < secs.Count; s++)
                     {
                         var posList = secs[s].Positions;
@@ -2982,6 +3100,12 @@ namespace MM2.Archive
                             if (uz < minZ) minZ = uz;
                             if (uz > maxZ) maxZ = uz;
                             if (uy > -500f && uy < minVertY) minVertY = uy;
+                            if (ux < cMinX) cMinX = ux;
+                            if (ux > cMaxX) cMaxX = ux;
+                            if (uy < cMinY) cMinY = uy;
+                            if (uy > cMaxY) cMaxY = uy;
+                            if (uz < cMinZ) cMinZ = uz;
+                            if (uz > cMaxZ) cMaxZ = uz;
                             sumX += ux;
                             sumZ += uz;
                             vTotal++;
@@ -2990,7 +3114,9 @@ namespace MM2.Archive
 
                     if (vTotal > 0)
                     {
-                        parsedCells.Add((new Vector3(sumX / vTotal, 0f, sumZ / vTotal), mats, secs));
+                        var cellBounds = new Bounds();
+                        cellBounds.SetMinMax(new Vector3(cMinX, cMinY, cMinZ), new Vector3(cMaxX, cMaxY, cMaxZ));
+                        parsedCells.Add((bmsPath, cellKey, new Vector3(sumX / vTotal, 0f, sumZ / vTotal), cellBounds, mats, secs));
                     }
                 }
 
@@ -3001,6 +3127,8 @@ namespace MM2.Archive
                 minZ -= 1f; maxZ += 1f;
             }
 
+            Mm1TunnelVolumeData tunnelVolume = BuildMm1TunnelVolumeData(parsedCells, tunnelCellKeys);
+
             RuntimeDistrictChunk GetChunk(float ux, float uz)
             {
                 int gx = Mathf.Clamp((int)((ux - minX) / Math.Max(1f, maxX - minX) * GridN), 0, GridN - 1);
@@ -3008,11 +3136,23 @@ namespace MM2.Archive
                 return chunks[gx, gz];
             }
 
-            // 1. Append all cell and landmark .bms meshes to district chunks
+            // 1. Append all cell and landmark .bms meshes to district chunks (routing surface triangles that
+            // cross over or slice through sloped underground tunnels into tunnelSurfaceOverlapChunk)
             for (int c = 0; c < parsedCells.Count; c++)
             {
                 var cell = parsedCells[c];
                 RuntimeDistrictChunk chunk = GetChunk(cell.center.x, cell.center.z);
+                bool isTunnelCell = tunnelCellKeys.Contains(cell.cellKey);
+                bool nearTunnel = !isTunnelCell &&
+                                  tunnelVolume != null &&
+                                  tunnelVolume.IntersectsAnyTunnelBounds(cell.bounds, 5.0f, 3.0f);
+
+                Func<Vector3, Vector3, Vector3, bool> routeToOverlap = null;
+                if (nearTunnel)
+                {
+                    routeToOverlap = (u0, u1, u2) => tunnelVolume.ShouldRouteSurfaceBmsTriangleToOverlap(u0, u1, u2, cell.bounds);
+                }
+
                 AppendBmsSectionsToChunk(
                     chunk,
                     cell.mats,
@@ -3021,18 +3161,21 @@ namespace MM2.Archive
                     xa: Vector3.right,
                     ya: Vector3.up,
                     za: Vector3.forward,
-                    orig: Vector3.zero);
+                    orig: Vector3.zero,
+                    overlapChunk: nearTunnel ? tunnelSurfaceOverlapChunk : null,
+                    shouldRouteTriangleToOverlap: routeToOverlap);
             }
 
             // 2. Expand city/<mapName>.fcd (3D building facades, roofs, side walls, tunnels, freeway walls)
-            ExpandMm1FcdFile($"city/{spec.MapName}.fcd", GetChunk);
+            ExpandMm1FcdFile($"city/{spec.MapName}.fcd", GetChunk, tunnelVolume, tunnelSurfaceOverlapChunk);
 
             // 3. Expand city/<mapName>.bng (breakable props, traffic lights, streetlamps, trees, storefront windows)
             GameObject bangersRoot = new GameObject($"{spec.MapName}_Bangers");
             bangersRoot.transform.SetParent(cityRoot.transform, false);
             ExpandMm1BngFile($"city/{spec.MapName}.bng", GetChunk, bangersRoot.transform);
 
-            Shader urpLit = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            Shader urpLit = Shader.Find("Universal Render Pipeline/Lit");
+            if (urpLit == null) urpLit = Shader.Find("Standard");
             var cityMatCache = new Dictionary<string, Material>(StringComparer.OrdinalIgnoreCase);
             Material GetCityMaterial(string tName) => GetOrCreateCityMaterial(tName, urpLit, cityMatCache);
 
@@ -3046,76 +3189,243 @@ namespace MM2.Archive
             {
                 for (int gz = 0; gz < GridN; gz++)
                 {
-                    RuntimeDistrictChunk ch = chunks[gx, gz];
-                    if (ch.VisualByTexture.Count == 0 && ch.ColTriangles.Count == 0) continue;
+                    InstantiateDistrictChunkGameObject(
+                        chunks[gx, gz],
+                        $"{spec.MapName}_District_{gx}_{gz}",
+                        cityRoot.transform,
+                        GetCityMaterial,
+                        out _,
+                        out _);
+                }
+            }
 
-                    GameObject chunkGo = new GameObject($"{spec.MapName}_District_{gx}_{gz}");
-                    chunkGo.transform.SetParent(cityRoot.transform, false);
+            if (tunnelVolume != null &&
+                (tunnelSurfaceOverlapChunk.VisualByTexture.Count > 0 || tunnelSurfaceOverlapChunk.ColTriangles.Count > 0))
+            {
+                InstantiateDistrictChunkGameObject(
+                    tunnelSurfaceOverlapChunk,
+                    $"{spec.MapName}_TunnelSurfaceOverlap",
+                    cityRoot.transform,
+                    GetCityMaterial,
+                    out MeshRenderer overlapRenderer,
+                    out MeshCollider overlapCollider);
 
-                    if (ch.VisualByTexture.Count > 0)
-                    {
-                        var allPos = new List<Vector3>();
-                        var allNorm = new List<Vector3>();
-                        var allUV = new List<Vector2>();
-                        var subTris = new List<int[]>();
-                        var mats = new List<Material>();
-
-                        foreach (var kvp in ch.VisualByTexture)
-                        {
-                            RuntimeSubmeshBucket b = kvp.Value;
-                            if (b.Triangles.Count == 0) continue;
-
-                            int baseV = allPos.Count;
-                            allPos.AddRange(b.Positions);
-                            allNorm.AddRange(b.Normals);
-                            allUV.AddRange(b.UVs);
-
-                            int[] indices = new int[b.Triangles.Count];
-                            for (int i = 0; i < indices.Length; i++) indices[i] = baseV + b.Triangles[i];
-                            subTris.Add(indices);
-                            mats.Add(GetCityMaterial(kvp.Key));
-                        }
-
-                        Mesh visMesh = new Mesh
-                        {
-                            name = chunkGo.name,
-                            indexFormat = IndexFormat.UInt32
-                        };
-                        visMesh.SetVertices(allPos);
-                        visMesh.SetNormals(allNorm);
-                        visMesh.SetUVs(0, allUV);
-                        visMesh.subMeshCount = subTris.Count;
-                        for (int s = 0; s < subTris.Count; s++)
-                        {
-                            visMesh.SetTriangles(subTris[s], s, false);
-                        }
-                        visMesh.RecalculateBounds();
-
-                        chunkGo.AddComponent<MeshFilter>().sharedMesh = visMesh;
-                        chunkGo.AddComponent<MeshRenderer>().sharedMaterials = mats.ToArray();
-                    }
-
-                    if (ch.ColPositions.Count > 0 && ch.ColTriangles.Count > 0)
-                    {
-                        Mesh colMesh = new Mesh
-                        {
-                            name = $"{chunkGo.name}_Col",
-                            indexFormat = IndexFormat.UInt32
-                        };
-                        colMesh.SetVertices(ch.ColPositions);
-                        colMesh.SetTriangles(ch.ColTriangles, 0, true);
-                        var mc = chunkGo.AddComponent<MeshCollider>();
-                        mc.sharedMesh = colMesh;
-                    }
+                if (overlapRenderer != null || overlapCollider != null)
+                {
+                    var portalCtrl = cityRoot.AddComponent<MM2Mm1TunnelPortalController>();
+                    portalCtrl.Initialize(tunnelVolume, overlapRenderer, overlapCollider);
                 }
             }
 
             // 6. Build SkyDome and Horizon Water Plane
             BuildRuntimeSkyDome(cityRoot.transform, spec.MapName);
-            BuildRuntimeHorizonWater(cityRoot.transform, CityWaterLevel, minX, maxX, minZ, maxZ, minVertY);
+            float mm1HorizonWaterY = hasExplicitWaterFileLevel ? CityWaterLevel : 0.0f;
+            BuildRuntimeHorizonWater(cityRoot.transform, mm1HorizonWaterY, minX, maxX, minZ, maxZ, minVertY, "t_water");
 
             sw.Stop();
             Debug.Log($"[MM2RuntimeCityLoader] Built runtime MM1 city '{spec.DisplayName}' ({spec.MapName}) from .ar archives in {sw.ElapsedMilliseconds} ms.");
+        }
+
+        private static void InstantiateDistrictChunkGameObject(
+            RuntimeDistrictChunk ch,
+            string chunkName,
+            Transform parent,
+            Func<string, Material> getCityMaterial,
+            out MeshRenderer meshRenderer,
+            out MeshCollider meshCollider
+        )
+        {
+            meshRenderer = null;
+            meshCollider = null;
+            if (ch == null || (ch.VisualByTexture.Count == 0 && ch.ColTriangles.Count == 0)) return;
+
+            GameObject chunkGo = new GameObject(chunkName);
+            chunkGo.transform.SetParent(parent, false);
+
+            if (ch.VisualByTexture.Count > 0)
+            {
+                var allPos = new List<Vector3>();
+                var allNorm = new List<Vector3>();
+                var allUV = new List<Vector2>();
+                var subTris = new List<int[]>();
+                var mats = new List<Material>();
+
+                foreach (var kvp in ch.VisualByTexture)
+                {
+                    RuntimeSubmeshBucket b = kvp.Value;
+                    if (b.Triangles.Count == 0) continue;
+
+                    int baseV = allPos.Count;
+                    allPos.AddRange(b.Positions);
+                    allNorm.AddRange(b.Normals);
+                    allUV.AddRange(b.UVs);
+
+                    int[] indices = new int[b.Triangles.Count];
+                    for (int i = 0; i < indices.Length; i++) indices[i] = baseV + b.Triangles[i];
+                    subTris.Add(indices);
+                    mats.Add(getCityMaterial(kvp.Key));
+                }
+
+                if (subTris.Count > 0)
+                {
+                    Mesh visMesh = new Mesh
+                    {
+                        name = chunkGo.name,
+                        indexFormat = IndexFormat.UInt32
+                    };
+                    visMesh.SetVertices(allPos);
+                    visMesh.SetNormals(allNorm);
+                    visMesh.SetUVs(0, allUV);
+                    visMesh.subMeshCount = subTris.Count;
+                    for (int s = 0; s < subTris.Count; s++)
+                    {
+                        visMesh.SetTriangles(subTris[s], s, false);
+                    }
+                    visMesh.RecalculateBounds();
+
+                    chunkGo.AddComponent<MeshFilter>().sharedMesh = visMesh;
+                    meshRenderer = chunkGo.AddComponent<MeshRenderer>();
+                    meshRenderer.sharedMaterials = mats.ToArray();
+                }
+            }
+
+            if (ch.ColPositions.Count > 0 && ch.ColTriangles.Count > 0)
+            {
+                Mesh colMesh = new Mesh
+                {
+                    name = $"{chunkGo.name}_Col",
+                    indexFormat = IndexFormat.UInt32
+                };
+                colMesh.SetVertices(ch.ColPositions);
+                colMesh.SetTriangles(ch.ColTriangles, 0, true);
+                meshCollider = chunkGo.AddComponent<MeshCollider>();
+                meshCollider.sharedMesh = colMesh;
+            }
+        }
+
+        private static string GetMm1CellKey(string bmsPath)
+        {
+            if (string.IsNullOrEmpty(bmsPath)) return string.Empty;
+            string p = bmsPath.Replace('\\', '/').ToLowerInvariant();
+            string[] suffixes = { "_h2.bms", "_a2.bms", "_h.bms", "_a.bms", ".bms" };
+            for (int i = 0; i < suffixes.Length; i++)
+            {
+                if (p.EndsWith(suffixes[i], StringComparison.Ordinal))
+                {
+                    return p.Substring(0, p.Length - suffixes[i].Length);
+                }
+            }
+            return p;
+        }
+
+        private static Mm1TunnelVolumeData BuildMm1TunnelVolumeData(
+            List<(string path, string cellKey, Vector3 center, Bounds bounds, List<MM2RuntimePkgLoader.PkgShaderEntry> mats, List<MM2RuntimePkgLoader.PkgSection> secs)> parsedCells,
+            HashSet<string> tunnelCellKeys
+        )
+        {
+            if (parsedCells == null || tunnelCellKeys == null || tunnelCellKeys.Count == 0)
+            {
+                return null;
+            }
+
+            var volume = new Mm1TunnelVolumeData();
+            var tunnelBoundsByKey = new Dictionary<string, Bounds>(StringComparer.OrdinalIgnoreCase);
+            var tunnelVertexHash = new HashSet<long>();
+
+            static long PackVertexQuantized(Vector3 u, float invStep)
+            {
+                long qx = (long)Mathf.RoundToInt(u.x * invStep);
+                long qy = (long)Mathf.RoundToInt(u.y * invStep);
+                long qz = (long)Mathf.RoundToInt(u.z * invStep);
+                return ((qx & 0x1FFFFFL) << 42) | ((qy & 0x1FFFFFL) << 21) | (qz & 0x1FFFFFL);
+            }
+
+            for (int c = 0; c < parsedCells.Count; c++)
+            {
+                var cell = parsedCells[c];
+                if (!tunnelCellKeys.Contains(cell.cellKey)) continue;
+
+                if (tunnelBoundsByKey.TryGetValue(cell.cellKey, out Bounds existing))
+                {
+                    existing.Encapsulate(cell.bounds.min);
+                    existing.Encapsulate(cell.bounds.max);
+                    tunnelBoundsByKey[cell.cellKey] = existing;
+                }
+                else
+                {
+                    tunnelBoundsByKey[cell.cellKey] = cell.bounds;
+                }
+
+                bool isRoadMesh = cell.path.EndsWith("_h.bms", StringComparison.OrdinalIgnoreCase) ||
+                                  cell.path.EndsWith("_h2.bms", StringComparison.OrdinalIgnoreCase);
+
+                for (int s = 0; s < cell.secs.Count; s++)
+                {
+                    var sec = cell.secs[s];
+                    int shIdx = sec.ShaderOffset;
+                    string tName = (cell.mats != null && shIdx >= 0 && shIdx < cell.mats.Count)
+                        ? CleanTexName(cell.mats[shIdx].TextureName)
+                        : string.Empty;
+                    bool isWaterTex = IsWaterSurfaceTexture(tName);
+                    if (isWaterTex) continue;
+
+                    var pos = sec.Positions;
+                    var tris = sec.Triangles;
+                    if (isRoadMesh)
+                    {
+                        for (int i = 0; i < pos.Count; i++)
+                        {
+                            Vector3 u = new Vector3(-pos[i].x, pos[i].y, pos[i].z);
+                            tunnelVertexHash.Add(PackVertexQuantized(u, 2.0f));
+                        }
+                    }
+
+                    for (int i = 0; i + 2 < tris.Count; i += 3)
+                    {
+                        Vector3 p0 = pos[tris[i + 2]];
+                        Vector3 p1 = pos[tris[i + 1]];
+                        Vector3 p2 = pos[tris[i]];
+                        Vector3 u0 = new Vector3(-p0.x, p0.y, p0.z);
+                        Vector3 u1 = new Vector3(-p1.x, p1.y, p1.z);
+                        Vector3 u2 = new Vector3(-p2.x, p2.y, p2.z);
+                        volume.RasterizeTunnelTriangle(u0, u1, u2);
+                    }
+                }
+            }
+
+            foreach (var kvp in tunnelBoundsByKey)
+            {
+                volume.AddTunnelCellBounds(kvp.Value);
+            }
+
+            // Record shared 3D portal entrance vertices where a non-tunnel _h/_h2 road cell connects to a tunnel cell
+            for (int c = 0; c < parsedCells.Count; c++)
+            {
+                var cell = parsedCells[c];
+                if (tunnelCellKeys.Contains(cell.cellKey)) continue;
+                if (!cell.path.EndsWith("_h.bms", StringComparison.OrdinalIgnoreCase) &&
+                    !cell.path.EndsWith("_h2.bms", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (!volume.IntersectsAnyTunnelBounds(cell.bounds, 2.0f, 2.0f)) continue;
+
+                for (int s = 0; s < cell.secs.Count; s++)
+                {
+                    var pos = cell.secs[s].Positions;
+                    for (int i = 0; i < pos.Count; i++)
+                    {
+                        Vector3 u = new Vector3(-pos[i].x, pos[i].y, pos[i].z);
+                        if (tunnelVertexHash.Contains(PackVertexQuantized(u, 2.0f)))
+                        {
+                            volume.AddPortalVertex(u);
+                        }
+                    }
+                }
+            }
+
+            volume.FinalizeGrid();
+            return volume;
         }
 
         private static void AppendBmsSectionsToChunk(
@@ -3126,10 +3436,14 @@ namespace MM2.Archive
             Vector3 xa,
             Vector3 ya,
             Vector3 za,
-            Vector3 orig
+            Vector3 orig,
+            RuntimeDistrictChunk overlapChunk = null,
+            Func<Vector3, Vector3, Vector3, bool> shouldRouteTriangleToOverlap = null
         )
         {
             if (chunk == null || sections == null) return;
+
+            bool canSplitToOverlap = overlapChunk != null && shouldRouteTriangleToOverlap != null;
 
             for (int s = 0; s < sections.Count; s++)
             {
@@ -3155,18 +3469,101 @@ namespace MM2.Archive
                                     tName.IndexOf("palm", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                     tName.IndexOf("bush", StringComparison.OrdinalIgnoreCase) >= 0;
                 bool isWaterTex = IsWaterSurfaceTexture(tName);
-                bool addSecCollider = addCollider && !isWaterTex;
-
-                if (!chunk.VisualByTexture.TryGetValue(tName, out RuntimeSubmeshBucket bucket))
+                if (isWaterTex && string.Equals(tName, "t_water", StringComparison.OrdinalIgnoreCase))
                 {
-                    bucket = new RuntimeSubmeshBucket();
-                    chunk.VisualByTexture[tName] = bucket;
+                    // Elevated fountain basins in MM1 (e.g. Buckingham Fountain cull36_h.bms at Y = +0.15m)
+                    // also use t_water as their shallow pool floor; keep them solid and driveable, while
+                    // Lake Michigan (Y = 0.0m) and the Chicago River (Y = -5.0m) are deep water hazards.
+                    float minSecY = float.MaxValue;
+                    for (int i = 0; i < sec.Positions.Count; i++)
+                    {
+                        Vector3 pt = sec.Positions[i];
+                        float wy = orig.y + pt.x * xa.y + pt.y * ya.y + pt.z * za.y;
+                        if (wy < minSecY) minSecY = wy;
+                    }
+                    if (minSecY > 0.05f)
+                    {
+                        isWaterTex = false;
+                    }
+                }
+                bool isFountainSprayTex = string.Equals(tName, "36_water", StringComparison.OrdinalIgnoreCase);
+                bool addSecCollider = addCollider && !isWaterTex && !isFountainSprayTex;
+
+                int vCount = sec.Positions.Count;
+                if (vCount == 0 || sec.Triangles.Count < 3) continue;
+
+                if (!canSplitToOverlap || isWaterTex)
+                {
+                    if (!chunk.VisualByTexture.TryGetValue(tName, out RuntimeSubmeshBucket bucket))
+                    {
+                        bucket = new RuntimeSubmeshBucket();
+                        chunk.VisualByTexture[tName] = bucket;
+                    }
+
+                    int baseV = bucket.Positions.Count;
+                    int baseColV = chunk.ColPositions.Count;
+
+                    for (int i = 0; i < vCount; i++)
+                    {
+                        Vector3 pt = sec.Positions[i];
+                        Vector3 wx = new Vector3(
+                            orig.x + pt.x * xa.x + pt.y * ya.x + pt.z * za.x,
+                            orig.y + pt.x * xa.y + pt.y * ya.y + pt.z * za.y,
+                            orig.z + pt.x * xa.z + pt.y * ya.z + pt.z * za.z
+                        );
+                        Vector3 uPos = new Vector3(-wx.x, wx.y, wx.z);
+
+                        Vector3 d = sec.Normals[i];
+                        Vector3 wn = new Vector3(
+                            d.x * xa.x + d.y * ya.x + d.z * za.x,
+                            d.x * xa.y + d.y * ya.y + d.z * za.y,
+                            d.x * xa.z + d.y * ya.z + d.z * za.z
+                        );
+                        Vector3 uNorm = new Vector3(-wn.x, wn.y, wn.z).normalized;
+                        if (isFoliageTex)
+                        {
+                            uNorm = new Vector3(uNorm.x * 0.15f, 0.98f, uNorm.z * 0.15f).normalized;
+                        }
+
+                        bucket.Positions.Add(uPos);
+                        bucket.Normals.Add(uNorm);
+                        bucket.UVs.Add(sec.UVs[i]);
+
+                        if (addSecCollider) chunk.ColPositions.Add(uPos);
+                    }
+
+                    int baseTriStart = bucket.Triangles.Count;
+                    for (int i = 0; i + 2 < sec.Triangles.Count; i += 3)
+                    {
+                        int i0 = sec.Triangles[i + 2];
+                        int i1 = sec.Triangles[i + 1];
+                        int i2 = sec.Triangles[i];
+                        bucket.Triangles.Add(baseV + i0);
+                        bucket.Triangles.Add(baseV + i1);
+                        bucket.Triangles.Add(baseV + i2);
+
+                        if (addSecCollider)
+                        {
+                            chunk.ColTriangles.Add(baseColV + i0);
+                            chunk.ColTriangles.Add(baseColV + i1);
+                            chunk.ColTriangles.Add(baseColV + i2);
+                        }
+                    }
+
+                    if (isWaterTex)
+                    {
+                        var secWaterTris = new List<int>(sec.Triangles.Count);
+                        for (int i = baseTriStart; i < bucket.Triangles.Count; i++)
+                        {
+                            secWaterTris.Add(bucket.Triangles[i]);
+                        }
+                        RecordWaterTriangles(bucket.Positions, secWaterTris);
+                    }
+                    continue;
                 }
 
-                int baseV = bucket.Positions.Count;
-                int baseColV = chunk.ColPositions.Count;
-                int vCount = sec.Positions.Count;
-
+                var uPositions = new Vector3[vCount];
+                var uNormals = new Vector3[vCount];
                 for (int i = 0; i < vCount; i++)
                 {
                     Vector3 pt = sec.Positions[i];
@@ -3175,7 +3572,7 @@ namespace MM2.Archive
                         orig.y + pt.x * xa.y + pt.y * ya.y + pt.z * za.y,
                         orig.z + pt.x * xa.z + pt.y * ya.z + pt.z * za.z
                     );
-                    Vector3 uPos = new Vector3(-wx.x, wx.y, wx.z);
+                    uPositions[i] = new Vector3(-wx.x, wx.y, wx.z);
 
                     Vector3 d = sec.Normals[i];
                     Vector3 wn = new Vector3(
@@ -3188,47 +3585,61 @@ namespace MM2.Archive
                     {
                         uNorm = new Vector3(uNorm.x * 0.15f, 0.98f, uNorm.z * 0.15f).normalized;
                     }
-
-                    bucket.Positions.Add(uPos);
-                    bucket.Normals.Add(uNorm);
-                    bucket.UVs.Add(sec.UVs[i]);
-
-                    if (addSecCollider) chunk.ColPositions.Add(uPos);
+                    uNormals[i] = uNorm;
                 }
 
-                int baseTriStart = bucket.Triangles.Count;
                 for (int i = 0; i + 2 < sec.Triangles.Count; i += 3)
                 {
                     int i0 = sec.Triangles[i + 2];
                     int i1 = sec.Triangles[i + 1];
                     int i2 = sec.Triangles[i];
-                    bucket.Triangles.Add(baseV + i0);
-                    bucket.Triangles.Add(baseV + i1);
-                    bucket.Triangles.Add(baseV + i2);
+
+                    Vector3 u0 = uPositions[i0];
+                    Vector3 u1 = uPositions[i1];
+                    Vector3 u2 = uPositions[i2];
+
+                    bool toOverlap = shouldRouteTriangleToOverlap(u0, u1, u2);
+                    RuntimeDistrictChunk dstChunk = toOverlap ? overlapChunk : chunk;
+
+                    if (!dstChunk.VisualByTexture.TryGetValue(tName, out RuntimeSubmeshBucket dstBucket))
+                    {
+                        dstBucket = new RuntimeSubmeshBucket();
+                        dstChunk.VisualByTexture[tName] = dstBucket;
+                    }
+
+                    int bV = dstBucket.Positions.Count;
+                    dstBucket.Positions.Add(u0);
+                    dstBucket.Positions.Add(u1);
+                    dstBucket.Positions.Add(u2);
+                    dstBucket.Normals.Add(uNormals[i0]);
+                    dstBucket.Normals.Add(uNormals[i1]);
+                    dstBucket.Normals.Add(uNormals[i2]);
+                    dstBucket.UVs.Add(sec.UVs[i0]);
+                    dstBucket.UVs.Add(sec.UVs[i1]);
+                    dstBucket.UVs.Add(sec.UVs[i2]);
+                    dstBucket.Triangles.Add(bV);
+                    dstBucket.Triangles.Add(bV + 1);
+                    dstBucket.Triangles.Add(bV + 2);
 
                     if (addSecCollider)
                     {
-                        chunk.ColTriangles.Add(baseColV + i0);
-                        chunk.ColTriangles.Add(baseColV + i1);
-                        chunk.ColTriangles.Add(baseColV + i2);
+                        int cV = dstChunk.ColPositions.Count;
+                        dstChunk.ColPositions.Add(u0);
+                        dstChunk.ColPositions.Add(u1);
+                        dstChunk.ColPositions.Add(u2);
+                        dstChunk.ColTriangles.Add(cV);
+                        dstChunk.ColTriangles.Add(cV + 1);
+                        dstChunk.ColTriangles.Add(cV + 2);
                     }
-                }
-
-                if (isWaterTex)
-                {
-                    var secWaterTris = new List<int>(sec.Triangles.Count);
-                    for (int i = baseTriStart; i < bucket.Triangles.Count; i++)
-                    {
-                        secWaterTris.Add(bucket.Triangles[i]);
-                    }
-                    RecordWaterTriangles(bucket.Positions, secWaterTris);
                 }
             }
         }
 
         private static void ExpandMm1FcdFile(
             string virtualPath,
-            Func<float, float, RuntimeDistrictChunk> getChunk
+            Func<float, float, RuntimeDistrictChunk> getChunk,
+            Mm1TunnelVolumeData tunnelVolume = null,
+            RuntimeDistrictChunk tunnelSurfaceOverlapChunk = null
         )
         {
             byte[] data = MM2ArchiveSystem.ReadFileBytes(virtualPath);
@@ -3288,6 +3699,16 @@ namespace MM2.Archive
 
                 RuntimeDistrictChunk chunk = getChunk(-orig.x, orig.z);
 
+                bool isTunnelTemplate = name.StartsWith("tunnel", StringComparison.OrdinalIgnoreCase) ||
+                                        name.StartsWith("freewaywall", StringComparison.OrdinalIgnoreCase);
+                Func<Vector3, Vector3, Vector3, bool> fcdRouteToOverlap = null;
+                RuntimeDistrictChunk fcdOverlapChunk = null;
+                if (!isTunnelTemplate && tunnelVolume != null && tunnelSurfaceOverlapChunk != null)
+                {
+                    fcdOverlapChunk = tunnelSurfaceOverlapChunk;
+                    fcdRouteToOverlap = tunnelVolume.ShouldRouteBuildingTriangleToOverlap;
+                }
+
                 if ((flags & 0x01) != 0)
                 {
                     if (tmpl.GeometryChunks.TryGetValue("FACADE_H", out var fSecs) ||
@@ -3303,23 +3724,23 @@ namespace MM2.Archive
                         tmpl.GeometryChunks.TryGetValue("BLDG_VL", out fSecs) ||
                         tmpl.GeometryChunks.TryGetValue("VL", out fSecs))
                     {
-                        AppendBmsSectionsToChunk(chunk, tmpl.Shaders, fSecs, true, xa, ya, za, orig);
+                        AppendBmsSectionsToChunk(chunk, tmpl.Shaders, fSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                     }
 
                     if (tmpl.GeometryChunks.TryGetValue("GRND_H", out var gSecs) ||
                         tmpl.GeometryChunks.TryGetValue("GRND_M", out gSecs) ||
                         tmpl.GeometryChunks.TryGetValue("GRND_L", out gSecs))
                     {
-                        AppendBmsSectionsToChunk(chunk, tmpl.Shaders, gSecs, true, xa, ya, za, orig);
+                        AppendBmsSectionsToChunk(chunk, tmpl.Shaders, gSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                     }
                 }
                 if ((flags & 0x08) != 0 && tmpl.GeometryChunks.TryGetValue("LEFT", out var lSecs))
                 {
-                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, lSecs, true, xa, ya, za, orig);
+                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, lSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                 }
                 if ((flags & 0x10) != 0 && tmpl.GeometryChunks.TryGetValue("RIGHT", out var rSecs))
                 {
-                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, rSecs, true, xa, ya, za, orig);
+                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, rSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                 }
                 if ((flags & 0x20) != 0 &&
                     (tmpl.GeometryChunks.TryGetValue("TOP_H", out var tSecs) ||
@@ -3327,19 +3748,19 @@ namespace MM2.Archive
                      tmpl.GeometryChunks.TryGetValue("TOP_L", out tSecs) ||
                      tmpl.GeometryChunks.TryGetValue("TOP_VL", out tSecs)))
                 {
-                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, tSecs, true, xa, ya, za, orig);
+                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, tSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                 }
                 if (((flags & 0x40) != 0 || (flags & 0x400) != 0) &&
                     tmpl.GeometryChunks.TryGetValue("BACK", out var bSecs))
                 {
-                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, bSecs, true, xa, ya, za, orig);
+                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, bSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                 }
                 if ((flags & 0x200) != 0 &&
                     (tmpl.GeometryChunks.TryGetValue("UPPER_H", out var uSecs) ||
                      tmpl.GeometryChunks.TryGetValue("UPPER_M", out uSecs) ||
                      tmpl.GeometryChunks.TryGetValue("UPPER_L", out uSecs)))
                 {
-                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, uSecs, true, xa, ya, za, orig);
+                    AppendBmsSectionsToChunk(chunk, tmpl.Shaders, uSecs, true, xa, ya, za, orig, fcdOverlapChunk, fcdRouteToOverlap);
                 }
             }
         }
@@ -3811,6 +4232,34 @@ namespace MM2.Archive
             }
         }
 
+        private static bool ShouldCullCityBackfaces(string tName)
+        {
+            if (string.IsNullOrEmpty(tName)) return false;
+
+            return tName.IndexOf("_bot_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("underside", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.Equals("l_side", StringComparison.OrdinalIgnoreCase) ||
+                   tName.Equals("l_side_n", StringComparison.OrdinalIgnoreCase) ||
+                   tName.Equals("r_l_side", StringComparison.OrdinalIgnoreCase) ||
+                   tName.Equals("r_l_side_n", StringComparison.OrdinalIgnoreCase) ||
+                   tName.Equals("r_l_track", StringComparison.OrdinalIgnoreCase) ||
+                   tName.Equals("t_blackline", StringComparison.OrdinalIgnoreCase) ||
+                   tName.IndexOf("lightsign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("banner", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("postbanner", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("usflag", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("ct_sign_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.EndsWith("_clock", StringComparison.OrdinalIgnoreCase) ||
+                   tName.IndexOf("chinagatesign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("chinagatedragon", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("chinadragon", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("gdelli_sign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("round_sign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("directsign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.IndexOf("caution", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   tName.Equals("checkpointstand", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static Material GetOrCreateCityMaterial(
             string tName,
             Shader urpLit,
@@ -3818,11 +4267,14 @@ namespace MM2.Archive
         )
         {
             if (cityMatCache.TryGetValue(tName, out Material m) && m != null) return m;
-            if (urpLit == null) urpLit = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            if (urpLit == null)
+            {
+                urpLit = Shader.Find("Universal Render Pipeline/Lit");
+                if (urpLit == null) urpLit = Shader.Find("Standard");
+            }
             m = new Material(urpLit) { name = $"Mat_City_{tName}" };
-            bool isBridgeUnderside = tName.IndexOf("_bot_", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                     tName.IndexOf("underside", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", isBridgeUnderside ? 2f : 0f);
+            bool cullBackfaces = ShouldCullCityBackfaces(tName);
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", cullBackfaces ? 2f : 0f);
             if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", 0.08f);
 
             if (tName.StartsWith("__color_", StringComparison.OrdinalIgnoreCase) && tName.Length >= 14)
@@ -5644,7 +6096,8 @@ namespace MM2.Archive
             float cityMaxX = 2000f,
             float cityMinZ = -2000f,
             float cityMaxZ = 2000f,
-            float minCityVertY = -20f
+            float minCityVertY = -20f,
+            string preferredWaterTex = "s_water"
         )
         {
             GameObject waterGo = new GameObject("Runtime_HorizonWater");
@@ -5704,7 +6157,15 @@ namespace MM2.Archive
             Material wMat = new Material(urpLit) { name = "Mat_Runtime_HorizonWater" };
             if (wMat.HasProperty("_Cull")) wMat.SetFloat("_Cull", 2f);
             if (wMat.HasProperty("_Smoothness")) wMat.SetFloat("_Smoothness", 0.2f);
-            var waterTex = MM2RuntimeDecoders.LoadTexture("s_water");
+            var waterTex = MM2RuntimeDecoders.LoadTexture(string.IsNullOrEmpty(preferredWaterTex) ? "s_water" : preferredWaterTex);
+            if (waterTex.Texture == null && !string.Equals(preferredWaterTex, "s_water", StringComparison.OrdinalIgnoreCase))
+            {
+                waterTex = MM2RuntimeDecoders.LoadTexture("s_water");
+            }
+            if (waterTex.Texture == null && !string.Equals(preferredWaterTex, "t_water", StringComparison.OrdinalIgnoreCase))
+            {
+                waterTex = MM2RuntimeDecoders.LoadTexture("t_water");
+            }
             if (waterTex.Texture != null)
             {
                 wMat.mainTexture = waterTex.Texture;
@@ -7320,6 +7781,491 @@ namespace MM2.Archive
             if (leafB != null)
             {
                 leafB.MoveRotation(baseRotB * localTilt);
+            }
+        }
+    }
+
+    internal sealed class Mm1TunnelVolumeData
+    {
+        private readonly Dictionary<long, Vector2> cellFloorCeil = new Dictionary<long, Vector2>(4096);
+        private readonly List<Bounds> tunnelCellBounds = new List<Bounds>(48);
+        private readonly List<Vector3> portalVertices = new List<Vector3>(256);
+        private Bounds overallBounds;
+        private bool hasOverallBounds;
+
+        private static long PackCell(int gx, int gz)
+        {
+            return ((long)gx << 32) | (uint)gz;
+        }
+
+        private static void UnpackCell(long key, out int gx, out int gz)
+        {
+            gx = (int)(key >> 32);
+            gz = (int)(uint)key;
+        }
+
+        private void RecordSample(int gx, int gz, float minY, float maxY)
+        {
+            long key = PackCell(gx, gz);
+            if (cellFloorCeil.TryGetValue(key, out Vector2 fc))
+            {
+                if (minY < fc.x) fc.x = minY;
+                if (maxY > fc.y) fc.y = maxY;
+                cellFloorCeil[key] = fc;
+            }
+            else
+            {
+                cellFloorCeil[key] = new Vector2(minY, maxY);
+            }
+        }
+
+        public void AddTunnelCellBounds(Bounds b)
+        {
+            tunnelCellBounds.Add(b);
+            if (!hasOverallBounds)
+            {
+                overallBounds = b;
+                hasOverallBounds = true;
+            }
+            else
+            {
+                overallBounds.Encapsulate(b.min);
+                overallBounds.Encapsulate(b.max);
+            }
+        }
+
+        public void AddPortalVertex(Vector3 v)
+        {
+            for (int i = 0; i < portalVertices.Count; i++)
+            {
+                if ((portalVertices[i] - v).sqrMagnitude < 0.09f) return;
+            }
+            portalVertices.Add(v);
+        }
+
+        public void RasterizeTunnelTriangle(Vector3 u0, Vector3 u1, Vector3 u2)
+        {
+            float minX = Mathf.Min(u0.x, Mathf.Min(u1.x, u2.x));
+            float maxX = Mathf.Max(u0.x, Mathf.Max(u1.x, u2.x));
+            float minY = Mathf.Min(u0.y, Mathf.Min(u1.y, u2.y));
+            float maxY = Mathf.Max(u0.y, Mathf.Max(u1.y, u2.y));
+            float minZ = Mathf.Min(u0.z, Mathf.Min(u1.z, u2.z));
+            float maxZ = Mathf.Max(u0.z, Mathf.Max(u1.z, u2.z));
+
+            // Sample edges every 0.5m so vertical tunnel walls and narrow triangles are captured
+            SampleSegment(u0, u1, minY, maxY);
+            SampleSegment(u1, u2, minY, maxY);
+            SampleSegment(u2, u0, minY, maxY);
+
+            float denom = (u1.z - u2.z) * (u0.x - u2.x) + (u2.x - u1.x) * (u0.z - u2.z);
+            if (Mathf.Abs(denom) <= 1e-4f) return;
+
+            float invDenom = 1f / denom;
+            int ix0 = Mathf.FloorToInt(minX);
+            int ix1 = Mathf.FloorToInt(maxX);
+            int iz0 = Mathf.FloorToInt(minZ);
+            int iz1 = Mathf.FloorToInt(maxZ);
+
+            for (int gx = ix0; gx <= ix1; gx++)
+            {
+                float px = gx + 0.5f;
+                for (int gz = iz0; gz <= iz1; gz++)
+                {
+                    float pz = gz + 0.5f;
+                    float w0 = ((u1.z - u2.z) * (px - u2.x) + (u2.x - u1.x) * (pz - u2.z)) * invDenom;
+                    float w1 = ((u2.z - u0.z) * (px - u2.x) + (u0.x - u2.x) * (pz - u2.z)) * invDenom;
+                    float w2 = 1f - w0 - w1;
+                    if (w0 >= -0.08f && w1 >= -0.08f && w2 >= -0.08f)
+                    {
+                        float y = Mathf.Clamp(w0 * u0.y + w1 * u1.y + w2 * u2.y, minY, maxY);
+                        RecordSample(gx, gz, y, y);
+                    }
+                }
+            }
+        }
+
+        private void SampleSegment(Vector3 a, Vector3 b, float triMinY, float triMaxY)
+        {
+            float dx = b.x - a.x;
+            float dz = b.z - a.z;
+            float flatLen = Mathf.Sqrt(dx * dx + dz * dz);
+            int steps = Mathf.Max(1, Mathf.CeilToInt(flatLen * 2f));
+            for (int s = 0; s <= steps; s++)
+            {
+                float t = (float)s / steps;
+                float px = a.x + dx * t;
+                float pz = a.z + dz * t;
+                float py = Mathf.Lerp(a.y, b.y, t);
+                RecordSample(Mathf.FloorToInt(px), Mathf.FloorToInt(pz), Mathf.Min(py, triMinY), Mathf.Max(py, triMaxY));
+            }
+        }
+
+        public void FinalizeGrid()
+        {
+            if (cellFloorCeil.Count == 0) return;
+
+            var snapshot = new List<KeyValuePair<long, Vector2>>(cellFloorCeil);
+            for (int i = 0; i < snapshot.Count; i++)
+            {
+                UnpackCell(snapshot[i].Key, out int gx, out int gz);
+                Vector2 fc = snapshot[i].Value;
+
+                for (int ox = -1; ox <= 1; ox++)
+                {
+                    for (int oz = -1; oz <= 1; oz++)
+                    {
+                        if (ox == 0 && oz == 0) continue;
+                        if (cellFloorCeil.TryGetValue(PackCell(gx + ox, gz + oz), out Vector2 nfc))
+                        {
+                            if (nfc.x < fc.x) fc.x = nfc.x;
+                            if (nfc.y > fc.y) fc.y = nfc.y;
+                        }
+                    }
+                }
+
+                if (fc.y < fc.x + 3.8f)
+                {
+                    fc.y = fc.x + 4.5f;
+                }
+                cellFloorCeil[snapshot[i].Key] = fc;
+            }
+        }
+
+        public bool IntersectsAnyTunnelBounds(Bounds b, float marginXZ, float marginY)
+        {
+            if (!hasOverallBounds) return false;
+            if (b.max.x < overallBounds.min.x - marginXZ || b.min.x > overallBounds.max.x + marginXZ ||
+                b.max.y < overallBounds.min.y - marginY || b.min.y > overallBounds.max.y + marginY ||
+                b.max.z < overallBounds.min.z - marginXZ || b.min.z > overallBounds.max.z + marginXZ)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < tunnelCellBounds.Count; i++)
+            {
+                Bounds tb = tunnelCellBounds[i];
+                if (b.max.x >= tb.min.x - marginXZ && b.min.x <= tb.max.x + marginXZ &&
+                    b.max.y >= tb.min.y - marginY && b.min.y <= tb.max.y + marginY &&
+                    b.max.z >= tb.min.z - marginXZ && b.min.z <= tb.max.z + marginXZ)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private bool TryGetFloorCeilNear(float ux, float uz, int radiusCells, out Vector2 fc)
+        {
+            int cx = Mathf.FloorToInt(ux);
+            int cz = Mathf.FloorToInt(uz);
+            if (cellFloorCeil.TryGetValue(PackCell(cx, cz), out fc))
+            {
+                return true;
+            }
+
+            bool found = false;
+            fc = new Vector2(float.MaxValue, float.MinValue);
+            for (int ox = -radiusCells; ox <= radiusCells; ox++)
+            {
+                for (int oz = -radiusCells; oz <= radiusCells; oz++)
+                {
+                    if (ox == 0 && oz == 0) continue;
+                    if (cellFloorCeil.TryGetValue(PackCell(cx + ox, cz + oz), out Vector2 nfc))
+                    {
+                        if (nfc.x < fc.x) fc.x = nfc.x;
+                        if (nfc.y > fc.y) fc.y = nfc.y;
+                        found = true;
+                    }
+                }
+            }
+            return found;
+        }
+
+        private bool IsPortalEntranceRoadTriangle(Vector3 u0, Vector3 u1, Vector3 u2)
+        {
+            if (portalVertices.Count == 0) return false;
+
+            Vector3 n = Vector3.Cross(u1 - u0, u2 - u0);
+            if (n.sqrMagnitude > 1e-6f)
+            {
+                n.Normalize();
+                if (Mathf.Abs(n.y) < 0.45f) return false;
+            }
+
+            // If any vertex or centroid is deep inside the tunnel where the triangle is well above the tunnel floor,
+            // it is a cross-street bridging over the tunnel, not a portal entrance seam.
+            Vector3 c = (u0 + u1 + u2) * (1f / 3f);
+            if (TryGetFloorCeilNear(u0.x, u0.z, 0, out Vector2 fc0) && Mathf.Abs(u0.y - fc0.x) > 0.75f) return false;
+            if (TryGetFloorCeilNear(u1.x, u1.z, 0, out Vector2 fc1) && Mathf.Abs(u1.y - fc1.x) > 0.75f) return false;
+            if (TryGetFloorCeilNear(u2.x, u2.z, 0, out Vector2 fc2) && Mathf.Abs(u2.y - fc2.x) > 0.75f) return false;
+            if (TryGetFloorCeilNear(c.x, c.z, 0, out Vector2 fcc) && Mathf.Abs(c.y - fcc.x) > 0.75f) return false;
+
+            for (int i = 0; i < portalVertices.Count; i++)
+            {
+                Vector3 pv = portalVertices[i];
+                if (IsVertexNearPortal(u0, pv) || IsVertexNearPortal(u1, pv) || IsVertexNearPortal(u2, pv))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool IsVertexNearPortal(Vector3 v, Vector3 pv)
+        {
+            float dx = v.x - pv.x;
+            float dz = v.z - pv.z;
+            return (dx * dx + dz * dz) <= 1.44f && Mathf.Abs(v.y - pv.y) <= 0.65f;
+        }
+
+        public bool ShouldRouteSurfaceBmsTriangleToOverlap(Vector3 u0, Vector3 u1, Vector3 u2, Bounds cellBounds)
+        {
+            if (IsPortalEntranceRoadTriangle(u0, u1, u2))
+            {
+                return false;
+            }
+
+            float minY = Mathf.Min(u0.y, Mathf.Min(u1.y, u2.y));
+            float maxY = Mathf.Max(u0.y, Mathf.Max(u1.y, u2.y));
+
+            if (DoesTriangleHitTunnelGrid(u0, u1, u2, minY, maxY, radiusCells: 1, ceilMargin: 2.5f))
+            {
+                return true;
+            }
+
+            // Also catch vertical retaining/river walls (_a.bms / _a2.bms) and road decks on cells that
+            // directly overlap a tunnel cell's 3D volume within 4.0m horizontally.
+            float minX = Mathf.Min(u0.x, Mathf.Min(u1.x, u2.x));
+            float maxX = Mathf.Max(u0.x, Mathf.Max(u1.x, u2.x));
+            float minZ = Mathf.Min(u0.z, Mathf.Min(u1.z, u2.z));
+            float maxZ = Mathf.Max(u0.z, Mathf.Max(u1.z, u2.z));
+
+            for (int i = 0; i < tunnelCellBounds.Count; i++)
+            {
+                Bounds tb = tunnelCellBounds[i];
+                if (maxX >= tb.min.x - 4.0f && minX <= tb.max.x + 4.0f &&
+                    maxZ >= tb.min.z - 4.0f && minZ <= tb.max.z + 4.0f &&
+                    maxY >= tb.min.y - 1.0f && minY <= tb.max.y + 2.5f)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public bool ShouldRouteBuildingTriangleToOverlap(Vector3 u0, Vector3 u1, Vector3 u2)
+        {
+            if (!hasOverallBounds) return false;
+
+            float minX = Mathf.Min(u0.x, Mathf.Min(u1.x, u2.x));
+            float maxX = Mathf.Max(u0.x, Mathf.Max(u1.x, u2.x));
+            float minY = Mathf.Min(u0.y, Mathf.Min(u1.y, u2.y));
+            float maxY = Mathf.Max(u0.y, Mathf.Max(u1.y, u2.y));
+            float minZ = Mathf.Min(u0.z, Mathf.Min(u1.z, u2.z));
+            float maxZ = Mathf.Max(u0.z, Mathf.Max(u1.z, u2.z));
+
+            if (maxX < overallBounds.min.x - 1.5f || minX > overallBounds.max.x + 1.5f ||
+                maxY < overallBounds.min.y - 1.5f || minY > overallBounds.max.y + 1.5f ||
+                maxZ < overallBounds.min.z - 1.5f || minZ > overallBounds.max.z + 1.5f)
+            {
+                return false;
+            }
+
+            return DoesTriangleHitTunnelGrid(u0, u1, u2, minY, maxY, radiusCells: 1, ceilMargin: 0.45f);
+        }
+
+        private bool DoesTriangleHitTunnelGrid(Vector3 u0, Vector3 u1, Vector3 u2, float minY, float maxY, int radiusCells, float ceilMargin)
+        {
+            if (CheckPointAgainstGrid(u0, minY, maxY, radiusCells, ceilMargin) ||
+                CheckPointAgainstGrid(u1, minY, maxY, radiusCells, ceilMargin) ||
+                CheckPointAgainstGrid(u2, minY, maxY, radiusCells, ceilMargin) ||
+                CheckPointAgainstGrid((u0 + u1 + u2) * (1f / 3f), minY, maxY, radiusCells, ceilMargin))
+            {
+                return true;
+            }
+
+            if (CheckEdgeAgainstGrid(u0, u1, minY, maxY, radiusCells, ceilMargin) ||
+                CheckEdgeAgainstGrid(u1, u2, minY, maxY, radiusCells, ceilMargin) ||
+                CheckEdgeAgainstGrid(u2, u0, minY, maxY, radiusCells, ceilMargin) ||
+                CheckEdgeAgainstGrid((u0 + u1) * 0.5f, u2, minY, maxY, radiusCells, ceilMargin))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool CheckEdgeAgainstGrid(Vector3 a, Vector3 b, float triMinY, float triMaxY, int radiusCells, float ceilMargin)
+        {
+            float dx = b.x - a.x;
+            float dz = b.z - a.z;
+            float flatLen = Mathf.Sqrt(dx * dx + dz * dz);
+            int steps = Mathf.Max(1, Mathf.CeilToInt(flatLen));
+            for (int s = 1; s < steps; s++)
+            {
+                float t = (float)s / steps;
+                Vector3 p = Vector3.Lerp(a, b, t);
+                if (CheckPointAgainstGrid(p, triMinY, triMaxY, radiusCells, ceilMargin))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private bool CheckPointAgainstGrid(Vector3 p, float triMinY, float triMaxY, int radiusCells, float ceilMargin)
+        {
+            if (!TryGetFloorCeilNear(p.x, p.z, radiusCells, out Vector2 fc))
+            {
+                return false;
+            }
+            if (p.y >= fc.x - 1.2f && p.y <= fc.y + ceilMargin)
+            {
+                return true;
+            }
+            if (triMinY <= fc.y + 0.25f && triMaxY >= fc.x - 0.5f)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        public bool IsPositionInTunnel(Vector3 pos, float heightAboveRoad, bool wasInTunnel)
+        {
+            int radius = wasInTunnel ? 2 : 1;
+            if (!TryGetFloorCeilNear(pos.x, pos.z, radius, out Vector2 fc))
+            {
+                return false;
+            }
+
+            float groundY = pos.y - heightAboveRoad;
+            if (wasInTunnel)
+            {
+                return groundY >= fc.x - 2.2f && groundY <= fc.x + 2.8f && groundY <= fc.y + 0.35f;
+            }
+            return groundY >= fc.x - 1.6f && groundY <= fc.x + 1.9f && groundY < fc.y - 0.25f;
+        }
+
+        public bool IsLookingIntoTunnelPortal(Vector3 playerPos, Vector3 playerFwd, Vector3 camPos, Vector3 camFwd)
+        {
+            if (ProbePortalAhead(playerPos, playerFwd, 0.55f) ||
+                ProbePortalAhead(camPos, camFwd, 1.5f))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        private bool ProbePortalAhead(Vector3 origin, Vector3 forward, float heightAboveRoad)
+        {
+            Vector3 flatFwd = new Vector3(forward.x, 0f, forward.z);
+            if (flatFwd.sqrMagnitude < 0.01f) return false;
+            flatFwd.Normalize();
+
+            float baseGroundY = origin.y - heightAboveRoad;
+            float[] dists = { 5f, 10f, 16f };
+            for (int i = 0; i < dists.Length; i++)
+            {
+                Vector3 probe = origin + flatFwd * dists[i];
+                if (TryGetFloorCeilNear(probe.x, probe.z, 1, out Vector2 fc))
+                {
+                    // Only trigger portal look-ahead if the tunnel floor ahead is near or sloping down from
+                    // the vehicle's current ground elevation (not 3.5m+ below a perpendicular cross-street).
+                    if (baseGroundY >= fc.x - 1.5f && baseGroundY <= fc.x + 1.85f && fc.x < fc.y - 1.0f)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    public sealed class MM2Mm1TunnelPortalController : MonoBehaviour
+    {
+        private Mm1TunnelVolumeData tunnelVolume;
+        private MeshRenderer overlapRenderer;
+        private MeshCollider overlapCollider;
+        private Transform playerTransform;
+        private bool playerInTunnel;
+        private bool cameraInTunnel;
+
+        internal void Initialize(Mm1TunnelVolumeData volume, MeshRenderer renderer, MeshCollider collider)
+        {
+            tunnelVolume = volume;
+            overlapRenderer = renderer;
+            overlapCollider = collider;
+            UpdatePortalCulling();
+        }
+
+        private void FixedUpdate()
+        {
+            UpdatePortalCulling();
+        }
+
+        private void LateUpdate()
+        {
+            UpdatePortalCulling();
+        }
+
+        private void UpdatePortalCulling()
+        {
+            if (tunnelVolume == null) return;
+
+            if (playerTransform == null)
+            {
+                var ctrl = FindFirstObjectByType<MM2.Vehicle.ArcadeVehicleController>();
+                if (ctrl != null)
+                {
+                    playerTransform = ctrl.transform;
+                }
+            }
+
+            Vector3 playerPos = Vector3.zero;
+            Vector3 playerFwd = Vector3.forward;
+            bool hasPlayer = playerTransform != null;
+            if (hasPlayer)
+            {
+                playerPos = playerTransform.position;
+                playerFwd = playerTransform.forward;
+                playerInTunnel = tunnelVolume.IsPositionInTunnel(playerPos, 0.55f, playerInTunnel);
+            }
+            else
+            {
+                playerInTunnel = false;
+            }
+
+            Camera mainCam = Camera.main;
+            Vector3 camPos = playerPos;
+            Vector3 camFwd = playerFwd;
+            if (mainCam != null)
+            {
+                Transform ct = mainCam.transform;
+                camPos = ct.position;
+                camFwd = ct.forward;
+                cameraInTunnel = tunnelVolume.IsPositionInTunnel(camPos, 1.5f, cameraInTunnel);
+            }
+            else
+            {
+                cameraInTunnel = false;
+            }
+
+            bool lookingIntoPortal = !playerInTunnel &&
+                                     !cameraInTunnel &&
+                                     hasPlayer &&
+                                     tunnelVolume.IsLookingIntoTunnelPortal(playerPos, playerFwd, camPos, camFwd);
+
+            bool enableVisuals = !(playerInTunnel || cameraInTunnel || lookingIntoPortal);
+            bool enableCollision = !playerInTunnel;
+
+            if (overlapRenderer != null && overlapRenderer.enabled != enableVisuals)
+            {
+                overlapRenderer.enabled = enableVisuals;
+            }
+            if (overlapCollider != null && overlapCollider.enabled != enableCollision)
+            {
+                overlapCollider.enabled = enableCollision;
             }
         }
     }

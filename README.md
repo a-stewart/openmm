@@ -6,6 +6,14 @@
 
 ---
 
+## Screenshots
+
+![San Francisco Cruise Gameplay](screenshots/san_francisco_cruise.jpg)
+![Crash Course Stunt Ramp Gameplay](screenshots/crash_course_jump.png)
+![Races & Event Selection Menu](screenshots/races_menu.png)
+
+---
+
 ## Getting Started (Bring Your Own `.ar` Archives)
 
 1. Place your legally owned `.ar` archive files into the `resources/` folder next to `OpenMadness.exe` / `OpenMadness.x86_64` (or `<ProjectRoot>/resources/` when running inside the Unity Editor):

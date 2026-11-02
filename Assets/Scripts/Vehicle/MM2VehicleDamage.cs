@@ -38,6 +38,7 @@ namespace MM2.Vehicle
         public float IncomingDamageMultiplier = 1.0f;
         public bool IsHeavilyDamaged;
         public bool IsTotaled;
+        public bool WasHitByPlayer;
         public int ActiveDamageZoneMask;
 
         public float Damage01 => MaxDamage > 1f ? Mathf.Clamp01(CurrentDamage / MaxDamage) : 0f;
@@ -197,6 +198,7 @@ namespace MM2.Vehicle
             CurrentDamage = 0f;
             IsHeavilyDamaged = false;
             IsTotaled = false;
+            WasHitByPlayer = false;
             ActiveDamageZoneMask = MM2RuntimePaintjobBinder.DamageZoneNone;
             _playedHeavyDamageAnnouncer = false;
             _recentColliderHitTimes.Clear();
@@ -243,6 +245,7 @@ namespace MM2.Vehicle
         public void NotifyPropImpact(Collider propCollider, Vector3 hitPoint, Vector3 hitNormal, float impactSpeedMps, float propMassKg)
         {
             if (IsTotaled) return;
+            if (!IsPlayerVehicle && MM2GameSession.IsCrashCourseSession) return;
             if (MM2RaceManager.Instance != null && MM2RaceManager.Instance.IsCountdownFrozen) return;
 
             if (propCollider != null)
@@ -291,6 +294,11 @@ namespace MM2.Vehicle
                 isImmovableWorld: false,
                 isProp: false
             );
+
+            if (!IsPlayerVehicle && otherRoot != null && otherRoot.GetComponent<ArcadeVehicleController>() != null)
+            {
+                WasHitByPlayer = true;
+            }
         }
 
         private void OnCollisionEnter(Collision collision)
@@ -367,6 +375,11 @@ namespace MM2.Vehicle
             else
             {
                 // Static city building / wall / bridge abutment / guardrail
+                if (!IsPlayerVehicle && MM2GameSession.IsCrashCourseSession)
+                {
+                    // Rail-following Crash Course target cars should not self-damage on narrow alley walls or curbs
+                    return;
+                }
                 otherMassKg = 5000f;
                 isImmovableWorld = true;
             }

@@ -118,6 +118,76 @@ namespace MM2.UI
         public float ActiveCrashFollowDistNear => activeCrashStage.FollowDistNear;
         public float ActiveCrashFollowDistFar => activeCrashStage.FollowDistFar;
 
+        public bool TryGetCrashFollowDistanceDebugInfo(
+            Vector3 playerPos,
+            out float currentDist,
+            out float failNear,
+            out float warnNear,
+            out float warnFar,
+            out float failFar
+        )
+        {
+            currentDist = 0f;
+            failNear = 8.0f;
+            warnNear = 25.0f;
+            warnFar = 97.5f;
+            failFar = 161.25f;
+
+            if (!IsRaceActive ||
+                !string.Equals(ActiveRaceType, "CrashCourse", StringComparison.OrdinalIgnoreCase) ||
+                activeCrashLesson == null ||
+                activeCrashStage.EventType != 2 ||
+                opponentManager == null ||
+                opponentManager.ActiveOpponents.Count == 0)
+            {
+                return false;
+            }
+
+            MM2OpponentAgent targetOpp = opponentManager.ActiveOpponents[0];
+            if (targetOpp == null) return false;
+
+            currentDist = Vector3.Distance(playerPos, targetOpp.transform.position);
+            failNear = 8.0f;
+            warnNear = Mathf.Max(failNear + 2f, activeCrashStage.FollowDistNear);
+            warnFar = Mathf.Max(warnNear + 5f, activeCrashStage.FollowDistFar * 1.3f);
+            failFar = Mathf.Max(warnFar + 5f, activeCrashStage.FollowDistFar * 2.15f);
+            return true;
+        }
+
+        public bool TryGetCrashDestroyCarDebugInfo(
+            ArcadeVehicleController playerCar,
+            out float playerDamagePercent,
+            out float opponentDamagePercent
+        )
+        {
+            playerDamagePercent = 0f;
+            opponentDamagePercent = 0f;
+
+            if (!IsRaceActive ||
+                !string.Equals(ActiveRaceType, "CrashCourse", StringComparison.OrdinalIgnoreCase) ||
+                activeCrashLesson == null ||
+                activeCrashStage.EventType != 8 ||
+                opponentManager == null ||
+                opponentManager.ActiveOpponents.Count == 0)
+            {
+                return false;
+            }
+
+            MM2OpponentAgent targetOpp = opponentManager.ActiveOpponents[0];
+            if (targetOpp == null) return false;
+
+            float playerDmg01 = (playerCar != null && playerCar.VehicleDamage != null)
+                ? playerCar.VehicleDamage.Damage01
+                : 0f;
+            float oppDmg01 = (targetOpp.Damage != null)
+                ? (targetOpp.Damage.IsTotaled ? 1.0f : Mathf.Clamp01(targetOpp.Damage.Damage01 / 0.98f))
+                : 0f;
+
+            playerDamagePercent = Mathf.Clamp(playerDmg01 * 100f, 0f, 100f);
+            opponentDamagePercent = Mathf.Clamp(oppDmg01 * 100f, 0f, 100f);
+            return true;
+        }
+
         public static MM2RaceManager EnsureExists()
         {
             if (instance != null) return instance;
@@ -1533,11 +1603,11 @@ namespace MM2.UI
                     if (targetOpp != null)
                     {
                         float dist = Vector3.Distance(currPos, targetOpp.transform.position);
-                        bool targetHitHard = targetOpp.Damage != null && targetOpp.Damage.Damage01 > 0.12f;
+                        bool hitByPlayer = targetOpp.Damage != null && targetOpp.Damage.WasHitByPlayer && dist < 14.0f;
 
                         if (blitzElapsedSeconds > 4.0f)
                         {
-                            if (dist < 8.0f || targetHitHard)
+                            if (dist < 8.0f || hitByPlayer)
                             {
                                 TriggerCrashCourseFail("You were spotted!");
                                 return;

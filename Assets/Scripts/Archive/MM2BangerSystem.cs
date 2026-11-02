@@ -37,7 +37,7 @@ namespace MM2.Archive
                 if (string.IsNullOrEmpty(PkgName))
                     return false;
 
-                // Trees, palms, bushes, streetlights, traffic lights, poles, signs, awnings, doors, and windows are always destructible
+                // Trees, palms, bushes, streetlights, traffic lights, poles, signs, awnings, doors, windows, and street props are always destructible
                 if (IsTreeOrFoliage || IsGlassOrDoor ||
                     PkgName.IndexOf("light", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     PkgName.IndexOf("traflit", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -47,7 +47,13 @@ namespace MM2.Archive
                     PkgName.IndexOf("banr", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     PkgName.IndexOf("banner", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     PkgName.IndexOf("fence", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    PkgName.IndexOf("exitfwy", StringComparison.OrdinalIgnoreCase) >= 0)
+                    PkgName.IndexOf("exitfwy", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("phone", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("booth", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("mail", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("barrel", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("box", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    PkgName.IndexOf("bevrg", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return false;
                 }
@@ -77,7 +83,7 @@ namespace MM2.Archive
                     return true;
                 }
 
-                return NumParts == 0 && (ImpulseLimit2 >= 5e7f || Mass >= 50000f);
+                return NumParts == 0 && ((ImpulseLimit2 >= 5e7f && Mass >= 2000f) || Mass >= 50000f);
             }
         }
 
@@ -461,7 +467,9 @@ namespace MM2.Archive
                 }
 
                 subTris.Add(tris);
-                mats.Add(GetOrCreatePropMaterial(shaderEntry, isGlassProp, isFoliageProp));
+                bool cullBackfaces = !isFoliageProp && !isGlassProp &&
+                                     (SectionHasCoplanarOppositeFaces(sec) || ShouldCullPropBackfaces(shaderEntry.TextureName));
+                mats.Add(GetOrCreatePropMaterial(shaderEntry, isGlassProp, isFoliageProp, cullBackfaces));
             }
 
             if (allPos.Count == 0 || subTris.Count == 0) return false;
@@ -480,14 +488,105 @@ namespace MM2.Archive
             return true;
         }
 
+        private static bool SectionHasCoplanarOppositeFaces(MM2RuntimePkgLoader.PkgSection sec)
+        {
+            if (sec == null || sec.Triangles == null || sec.Positions == null) return false;
+            int triIndices = sec.Triangles.Count;
+            if (triIndices < 6 || triIndices > 768) return false;
+
+            int posCount = sec.Positions.Count;
+            int triCount = triIndices / 3;
+            for (int a = 0; a < triCount; a++)
+            {
+                int a0 = sec.Triangles[a * 3];
+                int a1 = sec.Triangles[a * 3 + 1];
+                int a2 = sec.Triangles[a * 3 + 2];
+                if ((uint)a0 >= (uint)posCount || (uint)a1 >= (uint)posCount || (uint)a2 >= (uint)posCount) continue;
+
+                Vector3 pa0 = sec.Positions[a0];
+                Vector3 pa1 = sec.Positions[a1];
+                Vector3 pa2 = sec.Positions[a2];
+                Vector3 na = Vector3.Cross(pa1 - pa0, pa2 - pa0);
+                float naSq = na.sqrMagnitude;
+                if (naSq < 1e-6f) continue;
+                na /= Mathf.Sqrt(naSq);
+                Vector3 ca = (pa0 + pa1 + pa2) * (1f / 3f);
+
+                for (int b = a + 1; b < triCount; b++)
+                {
+                    int b0 = sec.Triangles[b * 3];
+                    int b1 = sec.Triangles[b * 3 + 1];
+                    int b2 = sec.Triangles[b * 3 + 2];
+                    if ((uint)b0 >= (uint)posCount || (uint)b1 >= (uint)posCount || (uint)b2 >= (uint)posCount) continue;
+
+                    Vector3 pb0 = sec.Positions[b0];
+                    Vector3 pb1 = sec.Positions[b1];
+                    Vector3 pb2 = sec.Positions[b2];
+                    Vector3 nb = Vector3.Cross(pb1 - pb0, pb2 - pb0);
+                    float nbSq = nb.sqrMagnitude;
+                    if (nbSq < 1e-6f) continue;
+                    nb /= Mathf.Sqrt(nbSq);
+
+                    if (Vector3.Dot(na, nb) > -0.85f) continue;
+
+                    Vector3 cb = (pb0 + pb1 + pb2) * (1f / 3f);
+                    if (Mathf.Abs(Vector3.Dot(cb - ca, na)) > 0.06f) continue;
+
+                    if ((cb - ca).sqrMagnitude < 0.04f)
+                    {
+                        return true;
+                    }
+
+                    int sharedVerts = 0;
+                    if ((pa0 - pb0).sqrMagnitude < 0.0004f || (pa0 - pb1).sqrMagnitude < 0.0004f || (pa0 - pb2).sqrMagnitude < 0.0004f) sharedVerts++;
+                    if ((pa1 - pb0).sqrMagnitude < 0.0004f || (pa1 - pb1).sqrMagnitude < 0.0004f || (pa1 - pb2).sqrMagnitude < 0.0004f) sharedVerts++;
+                    if ((pa2 - pb0).sqrMagnitude < 0.0004f || (pa2 - pb1).sqrMagnitude < 0.0004f || (pa2 - pb2).sqrMagnitude < 0.0004f) sharedVerts++;
+
+                    if (sharedVerts >= 2)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool ShouldCullPropBackfaces(string rawTexName)
+        {
+            string t = CleanTexName(rawTexName);
+            if (string.IsNullOrEmpty(t)) return false;
+
+            return t.Equals("l_side", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("l_side_n", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("r_l_side", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("r_l_side_n", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("r_l_track", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_blackline", StringComparison.OrdinalIgnoreCase) ||
+                   t.IndexOf("lightsign", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   t.IndexOf("banner", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   t.IndexOf("postbanner", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   t.IndexOf("usflag", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   t.IndexOf("caution", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   t.StartsWith("t_stop", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_1way", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_2way", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_75", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_l_only", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_do_not_enter", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("t_wrongway", StringComparison.OrdinalIgnoreCase) ||
+                   t.Equals("tpsbus", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static Material GetOrCreatePropMaterial(
             MM2RuntimePkgLoader.PkgShaderEntry sh,
             bool isGlassProp,
-            bool isFoliageProp = false
+            bool isFoliageProp = false,
+            bool cullBackfaces = false
         )
         {
             string texName = CleanTexName(sh.TextureName);
-            string key = $"{texName}_{sh.DiffuseColor.r}_{sh.DiffuseColor.g}_{sh.DiffuseColor.b}_{sh.DiffuseColor.a}_{(isGlassProp ? 1 : 0)}_{(isFoliageProp ? 1 : 0)}";
+            string key = $"{texName}_{sh.DiffuseColor.r}_{sh.DiffuseColor.g}_{sh.DiffuseColor.b}_{sh.DiffuseColor.a}_{(isGlassProp ? 1 : 0)}_{(isFoliageProp ? 1 : 0)}_{(cullBackfaces ? 1 : 0)}";
             if (materialCache.TryGetValue(key, out Material mat) && mat != null)
             {
                 if (!string.IsNullOrEmpty(texName))
@@ -497,14 +596,25 @@ namespace MM2.Archive
                 return mat;
             }
 
-            Shader urpLit = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            Shader urpLit = Shader.Find("Universal Render Pipeline/Lit");
+            if (urpLit == null) urpLit = Shader.Find("Standard");
             mat = new Material(urpLit)
             {
                 name = string.IsNullOrEmpty(texName) ? "Mat_Banger_Color" : $"Mat_Banger_{texName}",
                 enableInstancing = true
             };
 
-            if (mat.HasProperty("_Cull")) mat.SetFloat("_Cull", 0f);
+            bool isGlowSprite = !string.IsNullOrEmpty(texName) &&
+                                texName.IndexOf("glow", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool isGlassTex = isGlassProp ||
+                              (!string.IsNullOrEmpty(texName) &&
+                               texName.IndexOf("glass", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            // Enable backface culling (_Cull = 2) for props with explicit front-and-back faces (e.g. Chicago
+            // opstlite_red/green/blue lamppost banners OT_LIGHTSIGN01..03, SF sp_lightbanr* banners, street signs)
+            // so the reversed back face does not Z-fight with the front face.
+            bool useBackfaceCull = cullBackfaces && !isGlowSprite && !isGlassTex && !isFoliageProp;
+            if (mat.HasProperty("_Cull")) mat.SetFloat("_Cull", useBackfaceCull ? 2f : 0f);
             float smoothness = isGlassProp ? 0.75f : (isFoliageProp ? 0.0f : 0.14f);
             if (mat.HasProperty("_Smoothness")) mat.SetFloat("_Smoothness", smoothness);
             if (mat.HasProperty("_SpecularHighlights") && isFoliageProp) mat.SetFloat("_SpecularHighlights", 0f);
@@ -514,12 +624,6 @@ namespace MM2.Archive
             {
                 baseCol = new Color(0.18f, 0.19f, 0.20f, 1f);
             }
-
-            bool isGlowSprite = !string.IsNullOrEmpty(texName) &&
-                                texName.IndexOf("glow", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool isGlassTex = isGlassProp ||
-                              (!string.IsNullOrEmpty(texName) &&
-                               texName.IndexOf("glass", StringComparison.OrdinalIgnoreCase) >= 0);
 
             if (!string.IsNullOrEmpty(texName))
             {

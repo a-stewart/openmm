@@ -87,9 +87,7 @@ namespace MM2.Archive
             "BREAK0_H", "BREAK1_H", "BREAK2_H", "BREAK3_H",
             "BREAK01_H", "BREAK03_H", "BREAK12_H", "BREAK23_H",
             "FNDR0_H", "FNDR1_H",
-            "SRN0_H", "SRN1_H", "SRN2_H", "SRN3_H",
-            "EXHAUST0_H", "EXHAUST1_H",
-            "TRAILER_HITCH_H"
+            "EXHAUST0_H", "EXHAUST1_H"
         };
 
         public static bool HasMm2PkgModel(string baseName)
@@ -545,7 +543,11 @@ namespace MM2.Archive
                 Vector3 p1 = verts[v1Idx];
                 Vector3 p2 = verts[v2Idx];
                 Vector3 fn;
-                if (faceNormals != null)
+                if (faceNormals != null &&
+                    !float.IsNaN(faceNormals[f].x) &&
+                    !float.IsNaN(faceNormals[f].y) &&
+                    !float.IsNaN(faceNormals[f].z) &&
+                    faceNormals[f].sqrMagnitude > 1e-6f)
                 {
                     fn = faceNormals[f];
                 }
@@ -1544,8 +1546,15 @@ namespace MM2.Archive
                 name = string.IsNullOrEmpty(texName) ? $"Mat_{pkg.BaseName}_Color" : $"Mat_{texName}"
             };
 
-            // Double-sided rendering so interior/wheel/fender/glass polygons are visible from all angles
-            if (mat.HasProperty("_Cull")) mat.SetFloat("_Cull", 0f);
+            // Double-sided rendering for open vehicle interiors/fenders, but cull backfaces on closed train cars
+            bool cullBackfaces = (pkg != null &&
+                                  (string.Equals(pkg.BaseName, "r_l_train", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(pkg.BaseName, "va_ug_l", StringComparison.OrdinalIgnoreCase))) ||
+                                 (!string.IsNullOrEmpty(texName) &&
+                                  (texName.StartsWith("r_l_", StringComparison.OrdinalIgnoreCase) ||
+                                   texName.Equals("l_side", StringComparison.OrdinalIgnoreCase) ||
+                                   texName.Equals("l_side_n", StringComparison.OrdinalIgnoreCase)));
+            if (mat.HasProperty("_Cull")) mat.SetFloat("_Cull", cullBackfaces ? 2f : 0f);
 
             MM2RuntimeDecoders.DecodedTextureInfo texInfo = default;
             if (!string.IsNullOrEmpty(texName))
@@ -1561,7 +1570,10 @@ namespace MM2.Archive
                 mat.color = Color.white;
 
                 string lowerTex = texName.ToLowerInvariant();
-                bool isGlowSprite = lowerTex.Contains("glow");
+                bool isGlowSprite = lowerTex.Contains("glow") ||
+                                    lowerTex.Contains("toplight") ||
+                                    lowerTex.Contains("sirlight") ||
+                                    lowerTex.Contains("fxltcone");
                 bool isGlassSurface = lowerTex.Contains("glass") || lowerTex.Contains("window") || lowerTex.Contains("vitre");
                 bool isWheelOrGrille = lowerTex.Contains("whl") || lowerTex.Contains("wheel") ||
                                        lowerTex.Contains("jante") || lowerTex.Contains("grille") ||

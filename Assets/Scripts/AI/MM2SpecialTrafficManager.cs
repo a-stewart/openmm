@@ -144,9 +144,21 @@ namespace MM2.AI
 
             if (containerRoot == null)
             {
-                GameObject go = new GameObject("MM2_SpecialCityTraffic");
-                go.transform.SetParent(transform, false);
-                containerRoot = go.transform;
+                Transform existingRoot = transform.Find("MM2_SpecialCityTraffic");
+                if (existingRoot != null)
+                {
+                    containerRoot = existingRoot;
+                    for (int i = containerRoot.childCount - 1; i >= 0; i--)
+                    {
+                        Destroy(containerRoot.GetChild(i).gameObject);
+                    }
+                }
+                else
+                {
+                    GameObject go = new GameObject("MM2_SpecialCityTraffic");
+                    go.transform.SetParent(transform, false);
+                    containerRoot = go.transform;
+                }
             }
 
             nightOrBadWeatherLights =
@@ -195,6 +207,14 @@ namespace MM2.AI
                 tr.Cars.Clear();
             }
             trains.Clear();
+
+            if (containerRoot != null)
+            {
+                for (int i = containerRoot.childCount - 1; i >= 0; i--)
+                {
+                    Destroy(containerRoot.GetChild(i).gameObject);
+                }
+            }
         }
 
         public void RefreshHeadlights(bool headlightsOn)

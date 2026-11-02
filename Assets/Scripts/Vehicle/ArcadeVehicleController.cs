@@ -26,9 +26,14 @@ namespace MM2.Vehicle
         public GameObject headlightsGlowObj;
         public GameObject brakelightsGlowObj;
         public GameObject reverselightsGlowObj;
+        public GameObject siren0GlowObj;
+        public GameObject siren1GlowObj;
         public bool headlightsOn;
+        public bool sirensOn;
         private Light leftHeadlightBeam;
         private Light rightHeadlightBeam;
+
+        public bool HasSirens => siren0GlowObj != null || siren1GlowObj != null;
 
         [Header("Vehicle Simulation Physics")]
         [Tooltip("Vehicle simulation parameters parsed from .vehcarsim, .vehGyro, and .asNode")]
@@ -717,6 +722,16 @@ namespace MM2.Vehicle
             if (rightHeadlightBeam != null) rightHeadlightBeam.enabled = headlightsOn;
         }
 
+        public void SetSirens(bool enabled)
+        {
+            sirensOn = enabled && HasSirens;
+            if (!sirensOn)
+            {
+                if (siren0GlowObj != null && siren0GlowObj.activeSelf) siren0GlowObj.SetActive(false);
+                if (siren1GlowObj != null && siren1GlowObj.activeSelf) siren1GlowObj.SetActive(false);
+            }
+        }
+
         private void EnsureHeadlightBeams()
         {
             if (leftHeadlightBeam != null && rightHeadlightBeam != null) return;
@@ -787,6 +802,24 @@ namespace MM2.Vehicle
             if (reverselightsGlowObj != null)
             {
                 if (reverselightsGlowObj.activeSelf != reversing) reverselightsGlowObj.SetActive(reversing);
+            }
+
+            if (sirensOn && HasSirens)
+            {
+                bool phase0 = (Mathf.FloorToInt(Time.time * 4.2f) & 1) == 0;
+                if (siren0GlowObj != null && siren0GlowObj.activeSelf != phase0)
+                {
+                    siren0GlowObj.SetActive(phase0);
+                }
+                if (siren1GlowObj != null && siren1GlowObj.activeSelf == phase0)
+                {
+                    siren1GlowObj.SetActive(!phase0);
+                }
+            }
+            else
+            {
+                if (siren0GlowObj != null && siren0GlowObj.activeSelf) siren0GlowObj.SetActive(false);
+                if (siren1GlowObj != null && siren1GlowObj.activeSelf) siren1GlowObj.SetActive(false);
             }
         }
 
@@ -864,9 +897,11 @@ namespace MM2.Vehicle
 
                 bool isSteeringHandbrake = Mathf.Abs(rawSteerInput) > 0.10f && horizSpeed > 1.2f;
                 bool isReverseSpin = handbrakeEntryMoveSign < 0f || (handbrakeEntryMoveSign == 0f && Vector3.Dot(vel, transform.forward) < -0.8f);
+                Vector3 fwdHoriz = new Vector3(transform.forward.x, 0f, transform.forward.z).normalized;
+                float spunDeg = handbrakeEntryForward.sqrMagnitude > 0.5f ? Vector3.Angle(handbrakeEntryForward, fwdHoriz) : 0f;
 
-                // In a reverse J-turn, leave the wheels unbraked while spinning so linear travel speed is preserved
-                float rearHbBrake = (isSteeringHandbrake && isReverseSpin)
+                // In a reverse J-turn (or past 60 degrees of a forward 180 flick), release wheel lock so longitudinal travel isn't braked dead
+                float rearHbBrake = (isSteeringHandbrake && (isReverseSpin || spunDeg > 60f))
                     ? 0f
                     : Mathf.Max(brakeTorque * 1.5f, simWheels[2].CurrentBrakeTorque);
                 rearLeftCollider.brakeTorque = rearHbBrake;
@@ -886,9 +921,7 @@ namespace MM2.Vehicle
                     }
                     else
                     {
-                        Vector3 fwdHoriz = new Vector3(transform.forward.x, 0f, transform.forward.z).normalized;
-                        float spunDeg = handbrakeEntryForward.sqrMagnitude > 0.5f ? Vector3.Angle(handbrakeEntryForward, fwdHoriz) : 0f;
-                        float frontSpinStiff = Mathf.Lerp(frontSidewaysGripStiffness, 0.22f, Mathf.InverseLerp(30f, 75f, spunDeg));
+                        float frontSpinStiff = Mathf.Lerp(frontSidewaysGripStiffness, 0.20f, Mathf.InverseLerp(25f, 65f, spunDeg));
                         SetFrontWheelStiffness(frontSpinStiff);
                     }
                 }
@@ -1169,13 +1202,26 @@ namespace MM2.Vehicle
 
         private void ApplyCorneringGripAssist()
         {
+            if (!isHandbrakeActive)
+            {
+                handbrakeEntryMoveSign = 0f;
+                handbrakeSpinSign = 0f;
+                handbrakeEntryForward = Vector3.zero;
+            }
+
             int groundedCount = CountGroundedWheels();
             if (groundedCount < 2) return;
 
             Vector3 vel = rb.linearVelocity;
             Vector3 horizVel = new Vector3(vel.x, 0f, vel.z);
             float horizSpeed = horizVel.magnitude;
-            if (horizSpeed < 0.5f) return;
+            if (horizSpeed < 0.5f)
+            {
+                handbrakeEntryMoveSign = 0f;
+                handbrakeSpinSign = 0f;
+                handbrakeEntryForward = Vector3.zero;
+                return;
+            }
 
             Vector3 fwd = transform.forward;
             fwd.y = 0f;
@@ -1244,16 +1290,16 @@ namespace MM2.Vehicle
                     bool isReverseJTurn = handbrakeEntryMoveSign < 0f;
                     float speedYawScale = isReverseJTurn
                         ? Mathf.Clamp01((horizSpeed - 1.0f) / 5.0f)
-                        : Mathf.Clamp01((horizSpeed - 1.5f) / 7.0f);
+                        : Mathf.Clamp01((horizSpeed - 0.8f) / 4.2f);
                     float maxSpinYawRad = isReverseJTurn
                         ? Mathf.Lerp(2.90f, 3.85f, absSteer)
-                        : Mathf.Lerp(2.45f, 3.45f, absSteer);
+                        : Mathf.Lerp(2.75f, 3.70f, absSteer);
 
                     // Smoothly arrest rotation as the spin completes 180 degrees from the entry heading
-                    float spinCompletionFactor = 1.0f - Mathf.SmoothStep(152f, 178f, spunAngleDeg);
+                    float spinCompletionFactor = 1.0f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(152f, 178f, spunAngleDeg));
                     float targetHbYawRad = handbrakeSpinSign * maxSpinYawRad * speedYawScale * spinCompletionFactor;
-                    float hbYawGain = isReverseJTurn ? 14.0f : 12.5f;
-                    float maxHbYawAccel = isReverseJTurn ? 18.0f : 16.0f;
+                    float hbYawGain = isReverseJTurn ? 14.0f : 13.5f;
+                    float maxHbYawAccel = isReverseJTurn ? 18.0f : 17.5f;
                     float hbYawAccel = Mathf.Clamp((targetHbYawRad - currentYawRad) * hbYawGain, -maxHbYawAccel, maxHbYawAccel);
                     rb.AddTorque(Vector3.up * hbYawAccel, ForceMode.Acceleration);
                 }
@@ -1293,7 +1339,7 @@ namespace MM2.Vehicle
                 {
                     // Forward Handbrake Turn / 180-Degree Flick:
                     // Moderate broadside drag so the car retains enough speed to complete a full 180-degree spin when held
-                    float broadsideDrag = Mathf.Lerp(4.2f, 9.5f, slideRatio) * fricScale;
+                    float broadsideDrag = Mathf.Lerp(3.2f, 6.8f, slideRatio) * fricScale;
                     rb.AddForce((-horizVel / horizSpeed) * broadsideDrag, ForceMode.Acceleration);
 
                     if (spunAngleDeg < 80f)

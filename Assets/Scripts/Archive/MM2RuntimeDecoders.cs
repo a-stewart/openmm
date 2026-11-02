@@ -325,6 +325,9 @@ namespace MM2.Archive
                                     lowerName.Contains("treesamll") ||
                                     lowerName.Contains("palm") ||
                                     lowerName.Contains("glow") ||
+                                    lowerName.Contains("toplight") ||
+                                    lowerName.Contains("sirlight") ||
+                                    lowerName.Contains("fxltcone") ||
                                     lowerName.StartsWith("beta_") ||
                                     lowerName.StartsWith("l-lod");
 

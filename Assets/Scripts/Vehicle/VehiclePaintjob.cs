@@ -483,12 +483,33 @@ namespace MM2.Vehicle
             {
                 spec.HasCarSim = true;
                 string currentBlock = string.Empty;
+                bool inGearRatiosArray = false;
+                bool hasExplicitTransHigh = false;
+                bool hasExplicitTransLow = false;
+                var parsedGearRatios = new List<float>(8);
                 string[] lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
                 foreach (string rawLine in lines)
                 {
                     string line = rawLine.Trim();
                     if (line.Length == 0 || line.StartsWith("#") || line.StartsWith("//")) continue;
+
+                    if (inGearRatiosArray)
+                    {
+                        string[] ratioTokens = line.Split(new[] { ' ', '\t', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (string rt in ratioTokens)
+                        {
+                            if (float.TryParse(rt, NumberStyles.Float, CultureInfo.InvariantCulture, out float gr))
+                            {
+                                parsedGearRatios.Add(gr);
+                            }
+                        }
+                        if (line.Contains("]"))
+                        {
+                            inGearRatiosArray = false;
+                        }
+                        continue;
+                    }
 
                     if (line.EndsWith("{"))
                     {
@@ -502,6 +523,25 @@ namespace MM2.Vehicle
                     if (line == "}")
                     {
                         currentBlock = string.Empty;
+                        continue;
+                    }
+
+                    if (currentBlock.Equals("Trans", StringComparison.OrdinalIgnoreCase) &&
+                        line.StartsWith("GearRatios", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string[] ratioTokens = line.Substring("GearRatios".Length)
+                            .Split(new[] { ' ', '\t', '[', ']' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (string rt in ratioTokens)
+                        {
+                            if (float.TryParse(rt, NumberStyles.Float, CultureInfo.InvariantCulture, out float gr))
+                            {
+                                parsedGearRatios.Add(gr);
+                            }
+                        }
+                        if (!line.Contains("]"))
+                        {
+                            inGearRatiosArray = true;
+                        }
                         continue;
                     }
 
@@ -552,7 +592,8 @@ namespace MM2.Vehicle
                         else if (key.Equals("CarFrictionHandling", StringComparison.OrdinalIgnoreCase))
                             cfg.CarFrictionHandling = v0;
                     }
-                    else if (currentBlock.Equals("Aero", StringComparison.OrdinalIgnoreCase))
+                    else if (currentBlock.Equals("Aero", StringComparison.OrdinalIgnoreCase) ||
+                             currentBlock.Equals("AeroCollide", StringComparison.OrdinalIgnoreCase))
                     {
                         if (key.Equals("AngCDamp", StringComparison.OrdinalIgnoreCase) && hasVec3)
                             cfg.AeroAngCDamp = new Vector3(v0, v1, v2);
@@ -589,12 +630,24 @@ namespace MM2.Vehicle
                             cfg.TransManualNumGears = Mathf.RoundToInt(v0);
                         else if (key.Equals("AutoNumGears", StringComparison.OrdinalIgnoreCase))
                             cfg.TransAutoNumGears = Mathf.RoundToInt(v0);
+                        else if (key.Equals("NumGears", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int nGears = Mathf.Clamp(Mathf.RoundToInt(v0), 4, 8);
+                            cfg.TransAutoNumGears = nGears;
+                            cfg.TransManualNumGears = Mathf.Clamp(nGears + 1, 5, 8);
+                        }
                         else if (key.Equals("Reverse", StringComparison.OrdinalIgnoreCase))
                             cfg.TransReverse = v0;
-                        else if (key.Equals("Low", StringComparison.OrdinalIgnoreCase))
+                        else if (key.Equals("Low", StringComparison.OrdinalIgnoreCase) && v0 > 1f)
+                        {
                             cfg.TransLow = v0;
-                        else if (key.Equals("High", StringComparison.OrdinalIgnoreCase))
+                            hasExplicitTransLow = true;
+                        }
+                        else if (key.Equals("High", StringComparison.OrdinalIgnoreCase) && v0 > 10f)
+                        {
                             cfg.TransHigh = v0;
+                            hasExplicitTransHigh = true;
+                        }
                         else if (key.Equals("GearBias", StringComparison.OrdinalIgnoreCase))
                             cfg.TransGearBias = v0;
                         else if (key.Equals("UpshiftBias", StringComparison.OrdinalIgnoreCase))
@@ -624,26 +677,31 @@ namespace MM2.Vehicle
                         else if (key.Equals("BrakeStaticCoef", StringComparison.OrdinalIgnoreCase))
                             cfg.FreetrainBrakeStaticCoef = v0;
                     }
-                    else if (currentBlock.Equals("WheelFront", StringComparison.OrdinalIgnoreCase))
+                    else if (currentBlock.Equals("WheelFront", StringComparison.OrdinalIgnoreCase) ||
+                             currentBlock.Equals("FrontLeft", StringComparison.OrdinalIgnoreCase))
                     {
                         ParseWheelConfigKey(cfg.WheelFront, key, v0);
-                        if (key.Equals("SteeringLimit", StringComparison.OrdinalIgnoreCase) && v0 > 0.1f)
+                        if ((key.Equals("SteeringLimit", StringComparison.OrdinalIgnoreCase) ||
+                             key.Equals("SteeringRatio", StringComparison.OrdinalIgnoreCase)) && v0 > 0.1f)
                             spec.SteeringLimitRad = v0;
                         else if (key.Equals("StaticFric", StringComparison.OrdinalIgnoreCase) && v0 > 0.2f)
                             spec.FrontStaticFric = v0;
                         else if (key.Equals("SlidingFric", StringComparison.OrdinalIgnoreCase) && v0 > 0.2f)
                             spec.FrontSlidingFric = v0;
-                        else if (key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase) && v0 > 0.05f)
+                        else if ((key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase) ||
+                                  key.Equals("BrakeRatio", StringComparison.OrdinalIgnoreCase)) && v0 > 0.05f)
                             spec.FrontBrakeCoef = v0;
                     }
-                    else if (currentBlock.Equals("WheelBack", StringComparison.OrdinalIgnoreCase))
+                    else if (currentBlock.Equals("WheelBack", StringComparison.OrdinalIgnoreCase) ||
+                             currentBlock.Equals("BackLeft", StringComparison.OrdinalIgnoreCase))
                     {
                         ParseWheelConfigKey(cfg.WheelBack, key, v0);
                         if (key.Equals("StaticFric", StringComparison.OrdinalIgnoreCase) && v0 > 0.2f)
                             spec.RearStaticFric = v0;
                         else if (key.Equals("SlidingFric", StringComparison.OrdinalIgnoreCase) && v0 > 0.2f)
                             spec.RearSlidingFric = v0;
-                        else if (key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase) && v0 > 0.05f)
+                        else if ((key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase) ||
+                                  key.Equals("BrakeRatio", StringComparison.OrdinalIgnoreCase)) && v0 > 0.05f)
                             spec.RearBrakeCoef = v0;
                         else if (key.Equals("HandbrakeCoef", StringComparison.OrdinalIgnoreCase) && v0 > 0.1f)
                             spec.HandbrakeCoef = v0;
@@ -661,6 +719,47 @@ namespace MM2.Vehicle
                             cfg.AxleBackTorqueCoef = v0;
                         else if (key.Equals("DampCoef", StringComparison.OrdinalIgnoreCase))
                             cfg.AxleBackDampCoef = v0;
+                    }
+                }
+
+                // MM1 .mmcarsim (and vpftruck.vehcarsim) define explicit GearRatios [ -Rev, 0, Gear1, ..., TopGear ]
+                // instead of Low/High MPH. Convert gear ratios to MPH at OptRPM using the inverse of GearRatioFromMPH.
+                if ((!hasExplicitTransHigh || !hasExplicitTransLow) && parsedGearRatios.Count >= 3)
+                {
+                    const float MphToMetersPerMin = 26.8224f;
+                    const float TwoPi = 6.2831855f;
+                    float optRpm = Mathf.Max(1500f, cfg.EngineOptRPM);
+                    float wheelRad = Mathf.Max(0.25f, spec.WheelRadius);
+
+                    float revRatio = Mathf.Abs(parsedGearRatios[0]);
+                    if (revRatio > 0.5f)
+                    {
+                        float revMph = (optRpm / revRatio) * (wheelRad * TwoPi) / MphToMetersPerMin;
+                        cfg.TransReverse = Mathf.Clamp(revMph, 18f, 45f);
+                    }
+
+                    float firstForwardRatio = 0f;
+                    float topForwardRatio = 0f;
+                    for (int g = 1; g < parsedGearRatios.Count; g++)
+                    {
+                        float r = parsedGearRatios[g];
+                        if (r > 0.2f)
+                        {
+                            if (firstForwardRatio <= 0f) firstForwardRatio = r;
+                            topForwardRatio = r;
+                        }
+                    }
+
+                    if (!hasExplicitTransLow && firstForwardRatio > 0.5f)
+                    {
+                        float lowMph = (optRpm / firstForwardRatio) * (wheelRad * TwoPi) / MphToMetersPerMin;
+                        cfg.TransLow = Mathf.Clamp(lowMph, 12f, 55f);
+                    }
+
+                    if (!hasExplicitTransHigh && topForwardRatio > 0.2f)
+                    {
+                        float highMph = (optRpm / topForwardRatio) * (wheelRad * TwoPi) / MphToMetersPerMin;
+                        cfg.TransHigh = Mathf.Clamp(highMph, Mathf.Max(45f, cfg.TransLow + 20f), 195f);
                     }
                 }
             }
@@ -808,9 +907,11 @@ namespace MM2.Vehicle
             else if (key.Equals("SuspensionLimit", StringComparison.OrdinalIgnoreCase)) wCfg.SuspensionLimit = val;
             else if (key.Equals("SuspensionFactor", StringComparison.OrdinalIgnoreCase)) wCfg.SuspensionFactor = val;
             else if (key.Equals("SuspensionDampCoef", StringComparison.OrdinalIgnoreCase)) wCfg.SuspensionDampCoef = val;
-            else if (key.Equals("SteeringLimit", StringComparison.OrdinalIgnoreCase)) wCfg.SteeringLimit = val;
+            else if (key.Equals("SteeringLimit", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("SteeringRatio", StringComparison.OrdinalIgnoreCase)) wCfg.SteeringLimit = val;
             else if (key.Equals("SteeringOffset", StringComparison.OrdinalIgnoreCase)) wCfg.SteeringOffset = val;
-            else if (key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase)) wCfg.BrakeCoef = val;
+            else if (key.Equals("BrakeCoef", StringComparison.OrdinalIgnoreCase) ||
+                     key.Equals("BrakeRatio", StringComparison.OrdinalIgnoreCase)) wCfg.BrakeCoef = val;
             else if (key.Equals("HandbrakeCoef", StringComparison.OrdinalIgnoreCase)) wCfg.HandbrakeCoef = val;
             else if (key.Equals("CamberLimit", StringComparison.OrdinalIgnoreCase)) wCfg.CamberLimit = val;
             else if (key.Equals("WobbleLimit", StringComparison.OrdinalIgnoreCase)) wCfg.WobbleLimit = val;
@@ -1138,10 +1239,18 @@ namespace MM2.Vehicle
             car.rearRightMesh = rrMesh;
 
             Transform lightsRoot = car.transform.Find("VehicleLights");
-            car.headlightsGlowObj = lightsRoot != null ? lightsRoot.Find("Headlights_Glow")?.gameObject : null;
-            car.brakelightsGlowObj = lightsRoot != null ? lightsRoot.Find("Brakelights_Glow")?.gameObject : null;
-            car.reverselightsGlowObj = lightsRoot != null ? lightsRoot.Find("Reverselights_Glow")?.gameObject : null;
+            Transform hlTrans = lightsRoot != null ? lightsRoot.Find("Headlights_Glow") : null;
+            Transform blTrans = lightsRoot != null ? lightsRoot.Find("Brakelights_Glow") : null;
+            Transform rlTrans = lightsRoot != null ? lightsRoot.Find("Reverselights_Glow") : null;
+            Transform s0Trans = lightsRoot != null ? lightsRoot.Find("Siren0_Glow") : null;
+            Transform s1Trans = lightsRoot != null ? lightsRoot.Find("Siren1_Glow") : null;
+            car.headlightsGlowObj = hlTrans != null ? hlTrans.gameObject : null;
+            car.brakelightsGlowObj = blTrans != null ? blTrans.gameObject : null;
+            car.reverselightsGlowObj = rlTrans != null ? rlTrans.gameObject : null;
+            car.siren0GlowObj = s0Trans != null ? s0Trans.gameObject : null;
+            car.siren1GlowObj = s1Trans != null ? s1Trans.gameObject : null;
             car.SetHeadlights(car.headlightsOn);
+            car.SetSirens(false);
 
             // Update WheelCollider positions & radii to match the vehicle's authentic .mtx offsets
             // (+0.04m Y mount offset matches the 1G resting equilibrium of 0.26m suspensionDistance)

@@ -23,6 +23,7 @@ namespace MM2.Vehicle
         private AudioSource idleSource;
         private AudioSource driveSource;
         private AudioSource hornSource;
+        private AudioClip sirenClip;
 
         private void Awake()
         {
@@ -86,10 +87,12 @@ namespace MM2.Vehicle
             if (newHorn != null)
             {
                 hornClip = newHorn;
-                if (hornSource != null)
-                {
-                    hornSource.clip = newHorn;
-                }
+            }
+            if (hornSource != null)
+            {
+                hornSource.Stop();
+                hornSource.loop = false;
+                hornSource.clip = newHorn;
             }
         }
 
@@ -102,6 +105,8 @@ namespace MM2.Vehicle
             {
                 if (idleSource != null) idleSource.volume = Mathf.MoveTowards(idleSource.volume, 0f, Time.deltaTime * 3f);
                 if (driveSource != null) driveSource.volume = Mathf.MoveTowards(driveSource.volume, 0f, Time.deltaTime * 3f);
+                if (hornSource != null && hornSource.isPlaying) hornSource.Stop();
+                if (controller.sirensOn) controller.SetSirens(false);
                 return;
             }
 
@@ -131,18 +136,59 @@ namespace MM2.Vehicle
                 driveSource.volume = Mathf.Lerp(0.2f, 1.0f, (speedRatio * 0.6f) + (throttle * 0.4f));
             }
 
-            // Horn Input
+            // Horn / Police Siren Input
             bool hornPressed = false;
+            bool hornJustPressed = false;
 #if ENABLE_INPUT_SYSTEM
             var kb = Keyboard.current;
-            if (kb != null && kb.hKey.isPressed) hornPressed = true;
+            if (kb != null)
+            {
+                if (kb.hKey.isPressed) hornPressed = true;
+                if (kb.hKey.wasPressedThisFrame) hornJustPressed = true;
+            }
             var gp = Gamepad.current;
-            if (gp != null && gp.buttonWest.isPressed) hornPressed = true;
+            if (gp != null)
+            {
+                if (gp.buttonWest.isPressed) hornPressed = true;
+                if (gp.buttonWest.wasPressedThisFrame) hornJustPressed = true;
+            }
 #else
             if (Input.GetKey(KeyCode.H)) hornPressed = true;
+            if (Input.GetKeyDown(KeyCode.H)) hornJustPressed = true;
 #endif
-            if (hornPressed && hornSource != null && !hornSource.isPlaying)
+            if (controller.HasSirens)
             {
+                if (hornJustPressed && !ArcadeVehicleController.IsInputLocked)
+                {
+                    controller.SetSirens(!controller.sirensOn);
+                    if (hornSource != null)
+                    {
+                        if (controller.sirensOn)
+                        {
+                            if (sirenClip == null)
+                            {
+                                sirenClip = MM2.Archive.MM2RuntimeDecoders.LoadAudioClip("police1whailerloop.11k");
+                                if (sirenClip == null)
+                                    sirenClip = MM2.Archive.MM2RuntimeDecoders.LoadAudioClip("police2sirenloop.11k");
+                            }
+                            hornSource.clip = sirenClip != null ? sirenClip : hornClip;
+                            hornSource.loop = true;
+                            if (hornSource.clip != null && !hornSource.isPlaying)
+                            {
+                                hornSource.Play();
+                            }
+                        }
+                        else
+                        {
+                            hornSource.loop = false;
+                            if (hornSource.isPlaying) hornSource.Stop();
+                        }
+                    }
+                }
+            }
+            else if (hornPressed && hornSource != null && !hornSource.isPlaying)
+            {
+                hornSource.loop = false;
                 hornSource.Play();
             }
         }

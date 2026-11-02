@@ -191,6 +191,7 @@ namespace MM2.UI
         public int ResolutionHeight = 0;
         public bool EnableLiveMenuBackground = false;
         public bool ShowFpsCounter = false;
+        public bool EnableDebugMode = false;
     }
 
     /// <summary>
@@ -227,6 +228,7 @@ namespace MM2.UI
         public static int CrashWorkRaceIndex = 0;
         public static bool EnableLiveMenuBackground = false;
         public static bool ShowFpsCounter = false;
+        public static bool EnableDebugMode = false;
         public static int SavedDisplayIndex = -1;
         public static string SavedDisplayName = "";
         public static int SavedWindowMode = -1; // -1 = Default, 0 = FullScreenWindow, 1 = ExclusiveFullScreen, 2 = Windowed
@@ -317,6 +319,7 @@ namespace MM2.UI
                     {
                         EnableLiveMenuBackground = data.EnableLiveMenuBackground;
                         ShowFpsCounter = data.ShowFpsCounter;
+                        EnableDebugMode = data.EnableDebugMode;
                         SavedDisplayIndex = data.DisplayIndex;
                         SavedDisplayName = data.DisplayName ?? "";
                         SavedWindowMode = data.WindowMode;
@@ -370,7 +373,8 @@ namespace MM2.UI
                     ResolutionWidth = SavedResolutionWidth > 0 ? SavedResolutionWidth : Screen.width,
                     ResolutionHeight = SavedResolutionHeight > 0 ? SavedResolutionHeight : Screen.height,
                     EnableLiveMenuBackground = EnableLiveMenuBackground,
-                    ShowFpsCounter = ShowFpsCounter
+                    ShowFpsCounter = ShowFpsCounter,
+                    EnableDebugMode = EnableDebugMode
                 };
                 string json = JsonUtility.ToJson(data, true);
                 File.WriteAllText(path, json);
@@ -697,6 +701,7 @@ namespace MM2.UI
         private Image imgLiveUiCheckTick;
         private Text txtLiveUiCheckMark;
         private Image imgFpsCheckboxBox;
+        private Image imgDebugCheckboxBox;
         private Text txtOptionsBottomHelp;
         private readonly List<DisplayInfo> availableDisplays = new List<DisplayInfo>();
         private string[] displayLabels = { "1: Display 1" };
@@ -4099,6 +4104,44 @@ namespace MM2.UI
                 ToggleFpsCounter();
             });
 
+            // 5c. Checkbox: Enable / Disable Debug Mode (Disabled by default)
+            GameObject dbgChkRow = CreateUIObject("Row_ToggleDebugMode", parent);
+            SetTopLeftRect(dbgChkRow.GetComponent<RectTransform>(), 910f, 640f, 860f, 64f);
+            Image dbgRowHit = dbgChkRow.AddComponent<Image>();
+            dbgRowHit.color = new Color(0f, 0f, 0f, 0f);
+
+            imgDebugCheckboxBox = CreateSpriteImage(
+                "Box_DebugCheckbox",
+                dbgChkRow.transform,
+                MM2GameSession.EnableDebugMode ? spCheckboxCheckedGreen : spCheckboxUnchecked,
+                0f,
+                6f,
+                52f,
+                52f
+            );
+            imgDebugCheckboxBox.raycastTarget = false;
+
+            CreateShadowLabel(
+                "Lbl_DebugCheckbox",
+                dbgChkRow.transform,
+                "DEBUG MODE",
+                74f,
+                4f,
+                760f,
+                56f,
+                36,
+                TextAnchor.MiddleLeft,
+                Color.white
+            );
+
+            Button dbgChkBtn = dbgChkRow.AddComponent<Button>();
+            dbgChkBtn.targetGraphic = dbgRowHit;
+            dbgChkBtn.onClick.AddListener(() =>
+            {
+                CloseActiveDropdown();
+                ToggleDebugMode();
+            });
+
             // 6. Bottom-Left Navigation on Right Side: [ <-- BACK ]
             CreateLeftBackButton("Btn_OptionsBack", parent, "BACK", 895f, 950f, 315f, 118f, 28, () =>
             {
@@ -4388,6 +4431,19 @@ namespace MM2.UI
             }
         }
 
+        private void ToggleDebugMode()
+        {
+            MM2GameSession.EnableDebugMode = !MM2GameSession.EnableDebugMode;
+            MM2GameSession.SaveSettings();
+            RefreshOptionsUI();
+            if (txtOptionsBottomHelp != null)
+            {
+                txtOptionsBottomHelp.text = MM2GameSession.EnableDebugMode
+                    ? "Debug mode enabled: Crash Course distance and damage overlays active (saved to settings.json)."
+                    : "Debug mode disabled (saved to settings.json).";
+            }
+        }
+
         private void RefreshOptionsUI()
         {
             if (txtDisplayValue != null && idxDisplay >= 0 && idxDisplay < displayLabels.Length)
@@ -4421,6 +4477,10 @@ namespace MM2.UI
             if (imgFpsCheckboxBox != null)
             {
                 imgFpsCheckboxBox.sprite = MM2GameSession.ShowFpsCounter ? spCheckboxCheckedGreen : spCheckboxUnchecked;
+            }
+            if (imgDebugCheckboxBox != null)
+            {
+                imgDebugCheckboxBox.sprite = MM2GameSession.EnableDebugMode ? spCheckboxCheckedGreen : spCheckboxUnchecked;
             }
         }
 
@@ -4685,9 +4745,11 @@ namespace MM2.UI
 
         private string statsModalSelectedCityCode = "";
         private string statsModalSelectedMode = "Blitz";
+        private float statsModalCityScrollPos = 1f;
         private string recordsModalSelectedCityCode = "";
         private string recordsModalSelectedMode = "Blitz";
         private int recordsModalSelectedCategory = 0; // 0 = Amateur Times, 1 = Pro Times, 2 = Pro Points
+        private float recordsModalCityScrollPos = 1f;
 
         private static string FormatModeDisplayLabel(string modeName)
         {
@@ -4842,10 +4904,190 @@ namespace MM2.UI
             return sr;
         }
 
+        private void BuildModalCityFilterColumns(
+            Transform dialogParent,
+            List<CitySpec> raceCities,
+            string selectedCityCode,
+            float startX,
+            float startY,
+            float availableWidth,
+            float rowH,
+            int maxVisibleRows,
+            bool preserveExistingScroll,
+            ref float savedScrollNormalized,
+            Action<string> onSelectCity
+        )
+        {
+            if (raceCities == null || raceCities.Count == 0) return;
+
+            int maxStaticCities = maxVisibleRows * 2; // 8 cities (2 columns x 4 rows)
+            if (raceCities.Count <= maxStaticCities)
+            {
+                float colW = Mathf.Min(430f, availableWidth * 0.5f);
+                for (int c = 0; c < raceCities.Count; c++)
+                {
+                    CitySpec cSpec = raceCities[c];
+                    int col = c / maxVisibleRows;
+                    int row = c % maxVisibleRows;
+                    string cCode = cSpec.MapName;
+                    string cLabel = (!string.IsNullOrEmpty(cSpec.DisplayName) ? cSpec.DisplayName : cSpec.MapName).ToUpperInvariant();
+                    bool isSelected = string.Equals(cCode, selectedCityCode, StringComparison.OrdinalIgnoreCase);
+
+                    CreateRecordsFilterCheckbox(
+                        dialogParent,
+                        $"Chk_City_{cCode}",
+                        cLabel,
+                        startX + col * colW,
+                        startY + row * rowH,
+                        colW - 14f,
+                        rowH - 2f,
+                        isSelected,
+                        () =>
+                        {
+                            if (onSelectCity != null) onSelectCity(cCode);
+                        }
+                    );
+                }
+                return;
+            }
+
+            // More than 8 cities: 2-column scrollable viewport (4 visible rows high)
+            float scrollbarW = 26f;
+            float viewportW = Mathf.Max(320f, availableWidth - scrollbarW - 12f);
+            float viewportH = maxVisibleRows * rowH;
+            float colWidth = viewportW * 0.5f;
+            int totalRows = Mathf.CeilToInt(raceCities.Count / 2f);
+            float totalContentH = Mathf.Max(viewportH, totalRows * rowH);
+
+            GameObject scrollRootGo = CreateUIObject("CityFilterScrollRoot", dialogParent);
+            SetTopLeftRect(scrollRootGo.GetComponent<RectTransform>(), startX, startY, viewportW, viewportH);
+            Image scrollHitImg = scrollRootGo.AddComponent<Image>();
+            scrollHitImg.color = new Color(0f, 0f, 0f, 0.01f);
+            scrollHitImg.raycastTarget = true;
+            scrollRootGo.AddComponent<RectMask2D>();
+
+            GameObject contentGo = CreateUIObject("Content", scrollRootGo.transform);
+            RectTransform contentRt = contentGo.GetComponent<RectTransform>();
+            contentRt.anchorMin = new Vector2(0f, 1f);
+            contentRt.anchorMax = new Vector2(0f, 1f);
+            contentRt.pivot = new Vector2(0f, 1f);
+            contentRt.anchoredPosition = Vector2.zero;
+            contentRt.sizeDelta = new Vector2(viewportW, totalContentH);
+
+            ScrollRect sr = scrollRootGo.AddComponent<ScrollRect>();
+            sr.viewport = scrollRootGo.GetComponent<RectTransform>();
+            sr.content = contentRt;
+            sr.horizontal = false;
+            sr.vertical = true;
+            sr.movementType = ScrollRect.MovementType.Clamped;
+            sr.inertia = true;
+            sr.decelerationRate = 0.12f;
+            sr.scrollSensitivity = 32f;
+
+            int selectedRow = 0;
+            for (int c = 0; c < raceCities.Count; c++)
+            {
+                CitySpec cSpec = raceCities[c];
+                int col = c / totalRows;
+                int row = c % totalRows;
+                string cCode = cSpec.MapName;
+                string cLabel = (!string.IsNullOrEmpty(cSpec.DisplayName) ? cSpec.DisplayName : cSpec.MapName).ToUpperInvariant();
+                bool isSelected = string.Equals(cCode, selectedCityCode, StringComparison.OrdinalIgnoreCase);
+                if (isSelected) selectedRow = row;
+
+                CreateRecordsFilterCheckbox(
+                    contentRt,
+                    $"Chk_City_{cCode}",
+                    cLabel,
+                    col * colWidth,
+                    row * rowH,
+                    colWidth - 12f,
+                    rowH - 2f,
+                    isSelected,
+                    () =>
+                    {
+                        if (onSelectCity != null) onSelectCity(cCode);
+                    }
+                );
+            }
+
+            float sbX = startX + viewportW + 8f;
+            float stepH = 24f;
+            float trackY = startY + stepH + 2f;
+            float trackH = Mathf.Max(32f, viewportH - (stepH + 2f) * 2f);
+            float rowStepNorm = 1f / Mathf.Max(1, totalRows - maxVisibleRows);
+
+            ScrollRect capturedSr = sr;
+            CreateChevronButton("Sb_CityUp", dialogParent, spChevronUp, sbX, startY, scrollbarW, stepH, () =>
+            {
+                if (capturedSr != null)
+                {
+                    capturedSr.verticalNormalizedPosition = Mathf.Clamp01(capturedSr.verticalNormalizedPosition + rowStepNorm);
+                }
+            });
+            CreateChevronButton("Sb_CityDown", dialogParent, spChevronDown, sbX, startY + viewportH - stepH, scrollbarW, stepH, () =>
+            {
+                if (capturedSr != null)
+                {
+                    capturedSr.verticalNormalizedPosition = Mathf.Clamp01(capturedSr.verticalNormalizedPosition - rowStepNorm);
+                }
+            });
+
+            GameObject sbTrackGo = CreateSolidRect("CityScrollbarTrack", dialogParent, sbX, trackY, scrollbarW, trackH, new Color32(6, 10, 48, 255));
+            sbTrackGo.GetComponent<Image>().raycastTarget = true;
+            GameObject sbFrame = CreateSlicedBox("TrackFrame", sbTrackGo.transform, spFrameTrans9 != null ? spFrameTrans9 : spBoxNavy9, 0f, 0f, scrollbarW, trackH);
+            sbFrame.GetComponent<Image>().raycastTarget = false;
+
+            GameObject slidingAreaGo = CreateUIObject("SlidingArea", sbTrackGo.transform);
+            RectTransform saRt = slidingAreaGo.GetComponent<RectTransform>();
+            saRt.anchorMin = Vector2.zero;
+            saRt.anchorMax = Vector2.one;
+            saRt.offsetMin = new Vector2(3f, 3f);
+            saRt.offsetMax = new Vector2(-3f, -3f);
+
+            GameObject handleGo = CreateUIObject("Handle", slidingAreaGo.transform);
+            RectTransform handleRt = handleGo.GetComponent<RectTransform>();
+            handleRt.anchorMin = Vector2.zero;
+            handleRt.anchorMax = Vector2.one;
+            handleRt.offsetMin = Vector2.zero;
+            handleRt.offsetMax = Vector2.zero;
+            Image handleImg = handleGo.AddComponent<Image>();
+            handleImg.color = new Color32(76, 114, 248, 255);
+            handleImg.raycastTarget = true;
+
+            Scrollbar sb = sbTrackGo.AddComponent<Scrollbar>();
+            sb.targetGraphic = handleImg;
+            sb.handleRect = handleRt;
+            sb.direction = Scrollbar.Direction.BottomToTop;
+
+            sr.verticalScrollbar = sb;
+            sr.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+
+            if (!preserveExistingScroll)
+            {
+                if (selectedRow >= maxVisibleRows && totalRows > maxVisibleRows)
+                {
+                    int firstVisibleRow = Mathf.Clamp(selectedRow - maxVisibleRows + 1, 0, totalRows - maxVisibleRows);
+                    savedScrollNormalized = 1f - (float)firstVisibleRow / (totalRows - maxVisibleRows);
+                }
+                else
+                {
+                    savedScrollNormalized = 1f;
+                }
+            }
+
+            sr.verticalNormalizedPosition = Mathf.Clamp01(savedScrollNormalized);
+        }
+
         private void ShowDriverStatsModal()
         {
+            bool wasAlreadyOpen = (activeModalOverlay != null);
             CloseActiveDropdown();
             CloseActiveModal();
+            if (!wasAlreadyOpen)
+            {
+                PlayMenuSfx("UIrecords");
+            }
 
             if (canvasRootRect == null) return;
 
@@ -4937,11 +5179,11 @@ namespace MM2.UI
 
                 CreateSolidRect("HeaderDivider", dialogGo.transform, 24f, 76f, dialogW - 48f, 3f, new Color32(110, 130, 235, 200));
 
-                // Main Table Box
+                // Main Table Box (leaves comfortable room below for RECORDS header, 4 filter rows, and bottom footnote/DONE bar)
                 float tableX = 36f;
-                float tableY = 92f;
+                float tableY = 90f;
                 float tableW = dialogW - 72f;
-                float tableH = dialogH - 375f;
+                float tableH = dialogH - 418f;
                 GameObject tableBox = CreateSlicedBox("Box_StatsTable", dialogGo.transform, spBoxBlack9 != null ? spBoxBlack9 : spBoxNavy9, tableX, tableY, tableW, tableH);
 
                 float headerH = 44f;
@@ -4967,10 +5209,11 @@ namespace MM2.UI
 
                 List<MM2DriverStatRow> rows = MM2PlayerManager.GetDriverStatsRows(statsModalSelectedCityCode, statsModalSelectedMode);
                 float rowH = 42f;
-                float totalContentH = Mathf.Max(vpH, Mathf.Max(12, rows.Count) * rowH);
+                int minVisibleRows = Mathf.Max(10, Mathf.FloorToInt(vpH / rowH));
+                int displayRowCount = Mathf.Max(minVisibleRows, rows.Count);
+                float totalContentH = Mathf.Max(vpH, displayRowCount * rowH);
                 contentRt.sizeDelta = new Vector2(vpW, totalContentH);
 
-                int displayRowCount = Mathf.Max(12, rows.Count);
                 for (int i = 0; i < displayRowCount; i++)
                 {
                     float ry = i * rowH;
@@ -5022,13 +5265,13 @@ namespace MM2.UI
                 sr.verticalNormalizedPosition = 1f;
 
                 // Bottom Filter Controls ("RECORDS:")
-                float filterTopY = tableY + tableH + 14f;
-                CreateShadowLabel("Lbl_RecordsHdr", dialogGo.transform, "RECORDS:", 40f, filterTopY, 280f, 40f, 30, TextAnchor.MiddleLeft, Color.white, fontUIExtraBold);
+                float filterTopY = tableY + tableH + 10f;
+                CreateShadowLabel("Lbl_RecordsHdr", dialogGo.transform, "RECORDS:", 40f, filterTopY, 280f, 36f, 28, TextAnchor.MiddleLeft, Color.white, fontUIExtraBold);
 
-                // Left Column: Available Race Modes in the selected city (Blitz, Circuit, Checkpoint, Crash Course)
+                // Left Column: Available Race Modes in the selected city (4 rows reserved for Blitz, Circuit, Checkpoint, Crash Course)
                 float modeStartX = 64f;
-                float modeStartY = filterTopY + 44f;
-                float modeRowH = 42f;
+                float modeStartY = filterTopY + 38f;
+                float modeRowH = 40f;
                 for (int m = 0; m < availModes.Count; m++)
                 {
                     string modeKey = availModes[m];
@@ -5050,52 +5293,54 @@ namespace MM2.UI
                     );
                 }
 
-                // Right Area: All Cities with Races (multi-column up to 4 rows per column)
-                float cityAreaX = dialogW * 0.42f;
-                float cityColW = 420f;
-                int maxCityRows = 4;
-                for (int c = 0; c < raceCities.Count; c++)
-                {
-                    CitySpec cSpec = raceCities[c];
-                    int col = c / maxCityRows;
-                    int row = c % maxCityRows;
-                    string cCode = cSpec.MapName;
-                    string cLabel = (!string.IsNullOrEmpty(cSpec.DisplayName) ? cSpec.DisplayName : cSpec.MapName).ToUpperInvariant();
-                    bool isSelected = string.Equals(cCode, statsModalSelectedCityCode, StringComparison.OrdinalIgnoreCase);
+                // Right Area: Cities (1 column for 1-4, 2 columns for 5-8, scrollable 2-column list for >8)
+                float cityAreaX = Mathf.Max(460f, dialogW * 0.36f);
+                float cityAreaW = dialogW - cityAreaX - 40f;
+                BuildModalCityFilterColumns(
+                    dialogGo.transform,
+                    raceCities,
+                    statsModalSelectedCityCode,
+                    cityAreaX,
+                    modeStartY,
+                    cityAreaW,
+                    modeRowH,
+                    4,
+                    wasAlreadyOpen,
+                    ref statsModalCityScrollPos,
+                    selectedCode =>
+                    {
+                        statsModalSelectedCityCode = selectedCode;
+                        ShowDriverStatsModal();
+                    }
+                );
 
-                    CreateRecordsFilterCheckbox(
-                        dialogGo.transform,
-                        $"Chk_City_{cCode}",
-                        cLabel,
-                        cityAreaX + col * cityColW,
-                        modeStartY + row * modeRowH,
-                        cityColW - 16f,
-                        modeRowH - 2f,
-                        isSelected,
-                        () =>
-                        {
-                            statsModalSelectedCityCode = cCode;
-                            ShowDriverStatsModal();
-                        }
-                    );
+                // Keep scroll position updated if the user scrolls the city list before clicking a filter
+                Transform citySrTr = dialogGo.transform.Find("CityFilterScrollRoot");
+                if (citySrTr != null)
+                {
+                    ScrollRect citySr = citySrTr.GetComponent<ScrollRect>();
+                    if (citySr != null)
+                    {
+                        citySr.onValueChanged.AddListener(_ => statsModalCityScrollPos = Mathf.Clamp01(citySr.verticalNormalizedPosition));
+                    }
                 }
 
-                // Bottom Disclaimer & [ DONE -> ] Button
+                // Bottom Disclaimer & [ DONE -> ] Button (comfortably below the 4th checkbox row)
                 CreateShadowLabel(
                     "Txt_StatsFootnote",
                     dialogGo.transform,
                     "STATISTICS AND RECORDS ARE ONLY SAVED WHEN USING DEFAULT RACE SETTINGS.\nEVENTS RUN WITH CUSTOM LAPS, CHECKPOINTS, OR OPPONENT COUNTS ARE NOT RECORDED.",
                     40f,
-                    dialogH - 72f,
-                    dialogW - 420f,
-                    58f,
+                    dialogH - 76f,
+                    dialogW - 400f,
+                    54f,
                     18,
                     TextAnchor.MiddleLeft,
                     new Color32(215, 222, 245, 255),
                     fontUIExtraBold
                 );
 
-                CreateRightArrowButton("Btn_StatsDone", dialogGo.transform, "DONE", dialogW - 330f, dialogH - 94f, 290f, 76f, 26, CloseActiveModal);
+                CreateRightArrowButton("Btn_StatsDone", dialogGo.transform, "DONE", dialogW - 330f, dialogH - 90f, 290f, 72f, 26, CloseActiveModal);
             }
             finally
             {
@@ -5105,8 +5350,13 @@ namespace MM2.UI
 
         private void ShowRaceRecordsModal()
         {
+            bool wasAlreadyOpen = (activeModalOverlay != null);
             CloseActiveDropdown();
             CloseActiveModal();
+            if (!wasAlreadyOpen)
+            {
+                PlayMenuSfx("UIrecords");
+            }
 
             if (canvasRootRect == null) return;
 
@@ -5201,9 +5451,9 @@ namespace MM2.UI
 
                 // Main Scrollable Table Box (Top 5 per race across all players)
                 float tableX = 36f;
-                float tableY = 92f;
+                float tableY = 90f;
                 float tableW = dialogW - 72f;
-                float tableH = dialogH - 375f;
+                float tableH = dialogH - 418f;
                 GameObject tableBox = CreateSlicedBox("Box_RecordsTable", dialogGo.transform, spBoxBlack9 != null ? spBoxBlack9 : spBoxNavy9, tableX, tableY, tableW, tableH);
 
                 float headerH = 44f;
@@ -5237,10 +5487,11 @@ namespace MM2.UI
                 );
 
                 float rowH = 40f;
-                float totalContentH = Mathf.Max(vpH, Mathf.Max(12, rows.Count) * rowH);
+                int minVisibleRows = Mathf.Max(10, Mathf.FloorToInt(vpH / rowH));
+                int displayRowCount = Mathf.Max(minVisibleRows, rows.Count);
+                float totalContentH = Mathf.Max(vpH, displayRowCount * rowH);
                 contentRt.sizeDelta = new Vector2(vpW, totalContentH);
 
-                int displayRowCount = Mathf.Max(12, rows.Count);
                 for (int i = 0; i < displayRowCount; i++)
                 {
                     float ry = i * rowH;
@@ -5271,13 +5522,13 @@ namespace MM2.UI
                 sr.verticalNormalizedPosition = 1f;
 
                 // Bottom Filter Controls ("RECORDS:")
-                float filterTopY = tableY + tableH + 14f;
-                CreateShadowLabel("Lbl_RecordsHdr", dialogGo.transform, "RECORDS:", 40f, filterTopY, 280f, 40f, 30, TextAnchor.MiddleLeft, Color.white, fontUIExtraBold);
+                float filterTopY = tableY + tableH + 10f;
+                CreateShadowLabel("Lbl_RecordsHdr", dialogGo.transform, "RECORDS:", 40f, filterTopY, 280f, 36f, 28, TextAnchor.MiddleLeft, Color.white, fontUIExtraBold);
 
-                float modeStartY = filterTopY + 44f;
-                float modeRowH = 42f;
+                float modeStartY = filterTopY + 38f;
+                float modeRowH = 40f;
 
-                // Column 1: Available Race Modes in selected city
+                // Column 1: Available Race Modes in selected city (4 rows)
                 float col1X = 56f;
                 for (int m = 0; m < availModes.Count; m++)
                 {
@@ -5289,7 +5540,7 @@ namespace MM2.UI
                         FormatModeDisplayLabel(modeKey),
                         col1X,
                         modeStartY + m * modeRowH,
-                        330f,
+                        320f,
                         modeRowH - 2f,
                         isSelected,
                         () =>
@@ -5301,7 +5552,7 @@ namespace MM2.UI
                 }
 
                 // Column 2: Amateur Times / Pro Times / Pro Points
-                float col2X = dialogW * 0.27f;
+                float col2X = dialogW * 0.25f;
                 for (int cat = 0; cat < categoryLabels.Length; cat++)
                 {
                     int capturedCat = cat;
@@ -5312,7 +5563,7 @@ namespace MM2.UI
                         categoryLabels[capturedCat],
                         col2X,
                         modeStartY + capturedCat * modeRowH,
-                        340f,
+                        320f,
                         modeRowH - 2f,
                         isSelected,
                         () =>
@@ -5323,34 +5574,35 @@ namespace MM2.UI
                     );
                 }
 
-                // Column 3+: All Cities with Races
-                float col3X = dialogW * 0.54f;
-                float cityColW = 360f;
-                int maxCityRows = 4;
-                for (int c = 0; c < raceCities.Count; c++)
-                {
-                    CitySpec cSpec = raceCities[c];
-                    int col = c / maxCityRows;
-                    int row = c % maxCityRows;
-                    string cCode = cSpec.MapName;
-                    string cLabel = (!string.IsNullOrEmpty(cSpec.DisplayName) ? cSpec.DisplayName : cSpec.MapName).ToUpperInvariant();
-                    bool isSelected = string.Equals(cCode, recordsModalSelectedCityCode, StringComparison.OrdinalIgnoreCase);
+                // Column 3+: All Cities with Races (1 col for 1-4, 2 cols for 5-8, scrollable 2-col for >8)
+                float col3X = dialogW * 0.48f;
+                float cityAreaW = dialogW - col3X - 40f;
+                BuildModalCityFilterColumns(
+                    dialogGo.transform,
+                    raceCities,
+                    recordsModalSelectedCityCode,
+                    col3X,
+                    modeStartY,
+                    cityAreaW,
+                    modeRowH,
+                    4,
+                    wasAlreadyOpen,
+                    ref recordsModalCityScrollPos,
+                    selectedCode =>
+                    {
+                        recordsModalSelectedCityCode = selectedCode;
+                        ShowRaceRecordsModal();
+                    }
+                );
 
-                    CreateRecordsFilterCheckbox(
-                        dialogGo.transform,
-                        $"Chk_City_{cCode}",
-                        cLabel,
-                        col3X + col * cityColW,
-                        modeStartY + row * modeRowH,
-                        cityColW - 14f,
-                        modeRowH - 2f,
-                        isSelected,
-                        () =>
-                        {
-                            recordsModalSelectedCityCode = cCode;
-                            ShowRaceRecordsModal();
-                        }
-                    );
+                Transform citySrTr = dialogGo.transform.Find("CityFilterScrollRoot");
+                if (citySrTr != null)
+                {
+                    ScrollRect citySr = citySrTr.GetComponent<ScrollRect>();
+                    if (citySr != null)
+                    {
+                        citySr.onValueChanged.AddListener(_ => recordsModalCityScrollPos = Mathf.Clamp01(citySr.verticalNormalizedPosition));
+                    }
                 }
 
                 // Bottom Disclaimer & [ DONE -> ] Button
@@ -5359,16 +5611,16 @@ namespace MM2.UI
                     dialogGo.transform,
                     "STATISTICS AND RECORDS ARE ONLY SAVED WHEN USING DEFAULT RACE SETTINGS.\nEVENTS RUN WITH CUSTOM LAPS, CHECKPOINTS, OR OPPONENT COUNTS ARE NOT RECORDED.",
                     40f,
-                    dialogH - 72f,
-                    dialogW - 420f,
-                    58f,
+                    dialogH - 76f,
+                    dialogW - 400f,
+                    54f,
                     18,
                     TextAnchor.MiddleLeft,
                     new Color32(215, 222, 245, 255),
                     fontUIExtraBold
                 );
 
-                CreateRightArrowButton("Btn_RecordsDone", dialogGo.transform, "DONE", dialogW - 330f, dialogH - 94f, 290f, 76f, 26, CloseActiveModal);
+                CreateRightArrowButton("Btn_RecordsDone", dialogGo.transform, "DONE", dialogW - 330f, dialogH - 90f, 290f, 72f, 26, CloseActiveModal);
             }
             finally
             {
@@ -5378,6 +5630,7 @@ namespace MM2.UI
 
         private void ShowDeleteDriverConfirmModal()
         {
+            PlayMenuSfx("uialert");
             string[] allPlayers = MM2PlayerManager.GetPlayerNames();
             if (allPlayers != null && allPlayers.Length <= 1)
             {
@@ -5779,30 +6032,37 @@ namespace MM2.UI
             if (screen == MenuScreen.MainMenu)
             {
                 RefreshMainMenuDriverUI();
+                PlayMenuSfx("UIdriver");
             }
             else if (screen == MenuScreen.Races)
             {
                 txtHeaderTitle.text = "RACES";
                 UpdateRaceModeVisualsAndControls(applyRaceMetadata: false);
+                PlayMenuSfx("UIraces");
             }
             else if (screen == MenuScreen.SelectVehicle)
             {
                 txtHeaderTitle.text = "SELECT VEHICLE";
                 RefreshVehicleLockUI();
+                PlayMenuSfx("UIvehicles");
+                PlayVehicleSelectSfx(VehicleCatalog.GetSpec(MM2GameSession.VehicleName));
             }
             else if (screen == MenuScreen.EventResults)
             {
                 txtHeaderTitle.text = "EVENT RESULTS";
                 RefreshEventResultsUI();
+                PlayMenuSfx("UIrecords");
             }
             else if (screen == MenuScreen.CrashCourseIntro)
             {
                 txtHeaderTitle.text = "CRASH COURSE";
+                PlayMenuSfx("UIraces");
             }
             else if (screen == MenuScreen.CrashCourseHub)
             {
                 txtHeaderTitle.text = "CRASH COURSE";
                 RefreshCrashCourseHubUI();
+                PlayMenuSfx("UIraces");
             }
             else if (screen == MenuScreen.Options)
             {
@@ -5810,6 +6070,7 @@ namespace MM2.UI
                 PopulateAvailableDisplays();
                 PopulateAvailableResolutions();
                 RefreshOptionsUI();
+                PlayMenuSfx("UIoptions");
             }
             else if (screen == MenuScreen.Help)
             {
@@ -6244,9 +6505,9 @@ namespace MM2.UI
             if (txtTimeOfDayValue != null) txtTimeOfDayValue.text = MM2GameSession.TimeOfDay;
             if (prev != idxTimeOfDay && currentScreen == MenuScreen.Races)
             {
-                string clipName = idxTimeOfDay == 0 ? "UImorning.22k"
-                    : (idxTimeOfDay == 1 ? "UInoon.22k"
-                    : (idxTimeOfDay == 2 ? "UImorning.22k" : "UInight.22k"));
+                string clipName = idxTimeOfDay == 0 ? "UImorning"
+                    : (idxTimeOfDay == 1 ? "UInoon"
+                    : (idxTimeOfDay == 2 ? "UIsunset" : "UInight"));
                 PlayMenuSfx(clipName);
             }
         }
@@ -6264,7 +6525,8 @@ namespace MM2.UI
             if (txtWeatherValue != null) txtWeatherValue.text = MM2GameSession.Weather;
             if (prev != idxWeather && currentScreen == MenuScreen.Races)
             {
-                string clipName = idxWeather == 3 ? "UIrain.22k" : "UIcloudy.22k";
+                string clipName = idxWeather == 0 ? "UIsunny"
+                    : (idxWeather == 3 ? "UIrain" : "UIcloudy");
                 PlayMenuSfx(clipName);
             }
         }
@@ -6279,8 +6541,15 @@ namespace MM2.UI
                 src = gameObject.AddComponent<AudioSource>();
                 src.spatialBlend = 0f;
                 src.playOnAwake = false;
+                src.loop = false;
             }
-            src.PlayOneShot(clip, 0.75f);
+            if (src.isPlaying)
+            {
+                src.Stop();
+            }
+            src.clip = clip;
+            src.volume = 0.75f;
+            src.Play();
         }
 
         private void StopVehicleSelectSfx()
@@ -6424,11 +6693,13 @@ namespace MM2.UI
                 string body = vehicleUnlocked
                     ? $"YOU CANNOT PICK A LOCKED PAINT JOB.\n\n{lockDesc}"
                     : $"YOU CANNOT PICK A LOCKED VEHICLE.\n\n{lockDesc}";
-                PlayMenuSfx("UIbad.22k");
+                PlayMenuSfx("uialert");
                 ShowModalDialog(title, body, "OK", CloseActiveModal, null, null);
                 return;
             }
 
+            StopVehicleSelectSfx();
+            PlayMenuSfx("UIgo");
             CleanupLiveMenuBackground();
             RestoreDisabledSceneCameras();
             MM2PlayerManager.SaveCurrentSelectionToActiveProfile();

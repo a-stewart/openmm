@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using MM2.AI;
 using MM2.Archive;
 using MM2.Vehicle;
@@ -34,6 +35,25 @@ namespace MM2.UI
         [SerializeField] private RectTransform playerArrowRect;
         [SerializeField] private RectTransform bottomLeftDashRect;
         [SerializeField] private Text txtFpsCounter;
+
+        // Top-right Debug Mode Overlay (below FPS counter)
+        private RectTransform debugOverlayRoot;
+        private GameObject debugFollowPanel;
+        private RectTransform debugFollowBarTrack;
+        private RectTransform[] debugFollowZoneSegments = new RectTransform[5];
+        private RectTransform[] debugFollowTickLines = new RectTransform[4];
+        private RectTransform[] debugFollowTickLabelRects = new RectTransform[4];
+        private Text[] debugFollowTickLabels = new Text[4];
+        private RectTransform debugFollowDriverMarker;
+        private RectTransform debugFollowDriverLabelRect;
+        private Text txtDebugFollowDriverDist;
+        private Text txtDebugFollowTitleValue;
+
+        private GameObject debugDestroyPanel;
+        private Text txtDebugPlayerDmgValue;
+        private RectTransform debugPlayerDmgFill;
+        private Text txtDebugOpponentDmgValue;
+        private RectTransform debugOpponentDmgFill;
 
         // Race HUD elements (top-left counters, top-centre timer, 3D green arrow, and yellow countdown text)
         [SerializeField] private GameObject raceHudContainer;
@@ -431,6 +451,8 @@ namespace MM2.UI
             );
             MM2GameSession.EnsureSettingsLoaded();
             txtFpsCounter.gameObject.SetActive(MM2GameSession.ShowFpsCounter);
+
+            BuildDebugOverlay(canvasRect);
         }
 
         /// <summary>
@@ -903,7 +925,7 @@ namespace MM2.UI
             MM2RuntimePkgLoader.ParsedPkg pkg = MM2RuntimePkgLoader.LoadPkg(pkgName);
             if (pkg == null || pkg.GeometryChunks.Count == 0)
             {
-                return false;
+                return TryBuildMm1HudMapMesh(mapName, parent);
             }
 
             List<MM2RuntimePkgLoader.PkgSection> sections = null;
@@ -921,14 +943,10 @@ namespace MM2.UI
 
             if (sections == null || sections.Count == 0)
             {
-                return false;
+                return TryBuildMm1HudMapMesh(mapName, parent);
             }
 
-            Shader unlitShader =
-                Shader.Find("Unlit/Texture") ??
-                Shader.Find("Universal Render Pipeline/Unlit") ??
-                Shader.Find("Sprites/Default") ??
-                Shader.Find("Standard");
+            Shader unlitShader = FindHudMapUnlitShader();
 
             GameObject meshGo = new GameObject($"HudMapMesh_{mapName}");
             meshGo.transform.SetParent(parent, false);
@@ -1009,7 +1027,7 @@ namespace MM2.UI
             if (submeshes.Count == 0)
             {
                 Destroy(meshGo);
-                return false;
+                return TryBuildMm1HudMapMesh(mapName, parent);
             }
 
             Mesh mesh = new Mesh
@@ -1038,6 +1056,204 @@ namespace MM2.UI
             mr.receiveShadows = false;
 
             return true;
+        }
+
+        /// <summary>
+        /// Builds a world-aligned minimap quad for MM1 cities (such as Chicago) from
+        /// bmp16/&lt;map&gt;640.jpg (or bmp16/&lt;map&gt;320.jpg) and city/&lt;map&gt;.ext world bounds.
+        /// </summary>
+        private bool TryBuildMm1HudMapMesh(string mapName, Transform parent)
+        {
+            if (string.IsNullOrEmpty(mapName) || parent == null) return false;
+
+            CitySpec spec = MM2RuntimeCityLoader.GetCitySpec(mapName);
+            string raceDir = (spec != null && !string.IsNullOrEmpty(spec.RaceDir)) ? spec.RaceDir : mapName;
+
+            string[] jpgCandidates =
+            {
+                $"bmp16/{mapName}640.jpg",
+                $"bmp16/{mapName}320.jpg",
+                $"bmp16/{raceDir}640.jpg",
+                $"bmp16/{raceDir}320.jpg"
+            };
+
+            Texture2D mapTex = null;
+            foreach (string candidate in jpgCandidates)
+            {
+                byte[] bytes = MM2ArchiveSystem.ReadFileBytes(candidate);
+                if (bytes == null || bytes.Length < 64) continue;
+
+                Texture2D loaded = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (loaded.LoadImage(bytes))
+                {
+                    // MM1 stores bmp16/<city>640.jpg and <city>320.jpg bottom-up (upside-down in standard JPG row order).
+                    // Flip rows vertically so North is at UV.y = 1.0, South is at UV.y = 0.0, and map labels read right-side up.
+                    int w = loaded.width;
+                    int h = loaded.height;
+                    Color32[] srcPixels = loaded.GetPixels32();
+                    Color32[] dstPixels = new Color32[srcPixels.Length];
+                    for (int y = 0; y < h; y++)
+                    {
+                        Array.Copy(srcPixels, y * w, dstPixels, (h - 1 - y) * w, w);
+                    }
+                    loaded.SetPixels32(dstPixels);
+                    loaded.Apply(false, false);
+                    loaded.name = $"MM1_HudMapTex_{mapName}";
+                    loaded.wrapMode = TextureWrapMode.Clamp;
+                    loaded.wrapModeU = TextureWrapMode.Clamp;
+                    loaded.wrapModeV = TextureWrapMode.Clamp;
+                    loaded.filterMode = FilterMode.Bilinear;
+                    mapTex = loaded;
+                    break;
+                }
+                Destroy(loaded);
+            }
+
+            if (mapTex == null)
+            {
+                return false;
+            }
+
+            if (!TryReadMm1CityExtents(mapName, raceDir, out float minX, out float minZ, out float maxX, out float maxZ))
+            {
+                if (TryComputeFallbackCityBounds(out Bounds fb))
+                {
+                    minX = -fb.max.x;
+                    maxX = -fb.min.x;
+                    minZ = fb.min.z;
+                    maxZ = fb.max.z;
+                }
+                else
+                {
+                    Destroy(mapTex);
+                    return false;
+                }
+            }
+
+            // In AGE coordinates, +X is East and -Z is North.
+            // Mapping (vx, vy, vz) -> (vx, 0f, -vz) places West..East along [minX, maxX]
+            // and South..North along [-maxZ, -minZ], matching MM2's hudmap_*.pkg convention.
+            float westX = minX;
+            float eastX = maxX;
+            float southZ = -maxZ;
+            float northZ = -minZ;
+
+            GameObject meshGo = new GameObject($"HudMapMesh_{mapName}");
+            meshGo.transform.SetParent(parent, false);
+            meshGo.transform.position = new Vector3(0f, MinimapWorldY, 0f);
+            meshGo.transform.rotation = Quaternion.identity;
+
+            Mesh mesh = new Mesh
+            {
+                name = $"HudMap_MM1_{mapName}"
+            };
+            mesh.SetVertices(new List<Vector3>
+            {
+                new Vector3(westX, 0f, southZ),
+                new Vector3(eastX, 0f, southZ),
+                new Vector3(eastX, 0f, northZ),
+                new Vector3(westX, 0f, northZ)
+            });
+            mesh.SetNormals(new List<Vector3>
+            {
+                Vector3.up,
+                Vector3.up,
+                Vector3.up,
+                Vector3.up
+            });
+            mesh.SetUVs(0, new List<Vector2>
+            {
+                new Vector2(0f, 0f),
+                new Vector2(1f, 0f),
+                new Vector2(1f, 1f),
+                new Vector2(0f, 1f)
+            });
+            mesh.SetTriangles(new[] { 0, 3, 2, 0, 2, 1 }, 0);
+            mesh.RecalculateBounds();
+
+            minimapBounds = mesh.bounds;
+            hasMinimapBounds = minimapBounds.size.x > 10f && minimapBounds.size.z > 10f;
+
+            Shader unlitShader = FindHudMapUnlitShader();
+            Material mat = new Material(unlitShader)
+            {
+                name = $"HudMapMat_MM1_{mapName}",
+                mainTexture = mapTex,
+                color = Color.white
+            };
+            if (mat.HasProperty("_BaseMap"))
+            {
+                mat.SetTexture("_BaseMap", mapTex);
+            }
+            if (mat.HasProperty("_BaseColor"))
+            {
+                mat.SetColor("_BaseColor", Color.white);
+            }
+
+            MeshFilter mf = meshGo.AddComponent<MeshFilter>();
+            mf.sharedMesh = mesh;
+
+            MeshRenderer mr = meshGo.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+
+            return true;
+        }
+
+        private static bool TryReadMm1CityExtents(
+            string mapName,
+            string raceDir,
+            out float minX,
+            out float minZ,
+            out float maxX,
+            out float maxZ)
+        {
+            minX = minZ = maxX = maxZ = 0f;
+            string[] extCandidates =
+            {
+                $"city/{mapName}.ext",
+                $"city/{raceDir}.ext"
+            };
+
+            foreach (string extPath in extCandidates)
+            {
+                string text = MM2ArchiveSystem.ReadFileText(extPath);
+                if (string.IsNullOrEmpty(text)) continue;
+
+                string[] tokens = text.Split(new[] { ' ', '\t', '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length >= 4 &&
+                    float.TryParse(tokens[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float rawMinX) &&
+                    float.TryParse(tokens[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float rawMinZ) &&
+                    float.TryParse(tokens[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float rawMaxX) &&
+                    float.TryParse(tokens[3], NumberStyles.Float, CultureInfo.InvariantCulture, out float rawMaxZ) &&
+                    rawMaxX > rawMinX + 10f &&
+                    rawMaxZ > rawMinZ + 10f)
+                {
+                    // city/<map>.ext stores the tight bounding box of the road network, which occupies
+                    // x in [15..628] (of 640px) and y in [56..708] from the top (of 719px) inside bmp16/<map>640.jpg
+                    // due to the outer frame bezel and top landmark label margin ("Wrigley Field").
+                    // Expand the quad extents by those margins so [0, 1] UVs align 1:1 with 3D world roads.
+                    float metersPerPxX = (rawMaxX - rawMinX) / (640f - 15f - 12f);
+                    float metersPerPxZ = (rawMaxZ - rawMinZ) / (719f - 56f - 11f);
+                    minX = rawMinX - 15f * metersPerPxX;
+                    maxX = rawMaxX + 12f * metersPerPxX;
+                    minZ = rawMinZ - 56f * metersPerPxZ;
+                    maxZ = rawMaxZ + 11f * metersPerPxZ;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static Shader FindHudMapUnlitShader()
+        {
+            Shader s = Shader.Find("Unlit/Texture");
+            if (s == null) s = Shader.Find("Universal Render Pipeline/Unlit");
+            if (s == null) s = Shader.Find("Sprites/Default");
+            if (s == null) s = Shader.Find("Standard");
+            return s;
         }
 
         private static Texture2D LoadHudMapTileTexture(string texName)
@@ -1138,6 +1354,16 @@ namespace MM2.UI
                         "60 FPS"
                     );
                 }
+            }
+
+            if (hudCanvas != null && (debugOverlayRoot == null || debugFollowPanel == null || debugDestroyPanel == null))
+            {
+                Transform existingDbg = hudCanvas.transform.Find("TopRight_DebugOverlay");
+                if (existingDbg != null)
+                {
+                    Destroy(existingDbg.gameObject);
+                }
+                BuildDebugOverlay(hudCanvas.GetComponent<RectTransform>());
             }
 
             if (minimapRawImage == null && hudCanvas != null)
@@ -1294,6 +1520,7 @@ namespace MM2.UI
             UpdateDamageMeterUv(currentDamage01);
             UpdateMinimapTransform(car);
             UpdateRaceHud(car);
+            UpdateDebugOverlay(car);
         }
 
         private void UpdateFpsCounter()
@@ -1318,6 +1545,539 @@ namespace MM2.UI
                 fpsDisplayUpdateTimer = 0.25f;
                 int fps = Mathf.Clamp(Mathf.RoundToInt(1.0f / Mathf.Max(0.0005f, smoothedUnscaledDt)), 1, 9999);
                 txtFpsCounter.text = $"{fps} FPS";
+            }
+        }
+
+        private static RectTransform CreateDebugSolidRect(
+            string name,
+            Transform parent,
+            Vector2 anchorMin,
+            Vector2 anchorMax,
+            Vector2 pivot,
+            Vector2 anchoredPos,
+            Vector2 sizeDelta,
+            Color32 color
+        )
+        {
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(parent, false);
+            RectTransform rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = anchorMin;
+            rt.anchorMax = anchorMax;
+            rt.pivot = pivot;
+            rt.anchoredPosition = anchoredPos;
+            rt.sizeDelta = sizeDelta;
+            Image img = go.AddComponent<Image>();
+            img.color = color;
+            img.raycastTarget = false;
+            return rt;
+        }
+
+        private void BuildDebugOverlay(RectTransform canvasRect)
+        {
+            if (canvasRect == null) return;
+
+            GameObject rootGo = new GameObject("TopRight_DebugOverlay");
+            rootGo.transform.SetParent(canvasRect, false);
+            debugOverlayRoot = rootGo.AddComponent<RectTransform>();
+            debugOverlayRoot.anchorMin = new Vector2(1f, 1f);
+            debugOverlayRoot.anchorMax = new Vector2(1f, 1f);
+            debugOverlayRoot.pivot = new Vector2(1f, 1f);
+            debugOverlayRoot.anchoredPosition = new Vector2(-18f, -54f);
+            debugOverlayRoot.sizeDelta = new Vector2(496f, 148f);
+
+            // =================================================================
+            // 1. Follow Distance Window Debug Panel (Crash Course EventType == 2)
+            // =================================================================
+            const float followPanelW = 496f;
+            const float followPanelH = 138f;
+            const float barTrackW = 440f;
+            const float barTrackH = 18f;
+
+            RectTransform followBg = CreateDebugSolidRect(
+                "Debug_FollowDistancePanel",
+                debugOverlayRoot,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                Vector2.zero,
+                new Vector2(followPanelW, followPanelH),
+                new Color32(6, 10, 24, 210)
+            );
+            debugFollowPanel = followBg.gameObject;
+
+            // Header Title & Live Distance Summary
+            CreateHudText(
+                "Lbl_FollowTitle",
+                followBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(14f, -8f),
+                new Vector2(260f, 26f),
+                19,
+                TextAnchor.UpperLeft,
+                new Color32(190, 215, 255, 255),
+                "FOLLOW DISTANCE WINDOW"
+            );
+
+            txtDebugFollowTitleValue = CreateHudText(
+                "Txt_FollowTitleValue",
+                followBg,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(-14f, -7f),
+                new Vector2(220f, 28f),
+                20,
+                TextAnchor.UpperRight,
+                new Color32(45, 255, 75, 255),
+                "0.0m (SAFE)"
+            );
+
+            // Horizontal Bar Track (anchored at top-left inside panel: x=28, y=-62, w=440, h=18)
+            debugFollowBarTrack = CreateDebugSolidRect(
+                "Bar_Track",
+                followBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(0f, 0.5f),
+                new Vector2(28f, -66f),
+                new Vector2(barTrackW, barTrackH),
+                new Color32(18, 22, 38, 255)
+            );
+
+            Color32[] zoneColors =
+            {
+                new Color32(220, 42, 42, 235),  // 0..FailNear (Fail Close)
+                new Color32(240, 165, 24, 235), // FailNear..WarnNear (Warn Close)
+                new Color32(42, 205, 68, 235),  // WarnNear..WarnFar (Safe Window)
+                new Color32(240, 165, 24, 235), // WarnFar..FailFar (Warn Far)
+                new Color32(220, 42, 42, 235)   // FailFar..Max (Fail Far)
+            };
+
+            for (int i = 0; i < 5; i++)
+            {
+                debugFollowZoneSegments[i] = CreateDebugSolidRect(
+                    $"Zone_{i}",
+                    debugFollowBarTrack,
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f),
+                    Vector2.zero,
+                    new Vector2(80f, barTrackH - 2f),
+                    zoneColors[i]
+                );
+            }
+
+            Color32[] tickTextColors =
+            {
+                new Color32(255, 105, 105, 255),
+                new Color32(255, 215, 75, 255),
+                new Color32(255, 215, 75, 255),
+                new Color32(255, 105, 105, 255)
+            };
+
+            for (int i = 0; i < 4; i++)
+            {
+                debugFollowTickLines[i] = CreateDebugSolidRect(
+                    $"TickLine_{i}",
+                    debugFollowBarTrack,
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0.5f, 0.5f),
+                    Vector2.zero,
+                    new Vector2(2f, barTrackH + 10f),
+                    new Color32(255, 255, 255, 235)
+                );
+
+                Text tickLbl = CreateHudText(
+                    $"TickLabel_{i}",
+                    debugFollowBarTrack,
+                    new Vector2(0f, 0.5f),
+                    new Vector2(0.5f, 1f),
+                    new Vector2(0f, -(barTrackH * 0.5f + 6f)),
+                    new Vector2(92f, 40f),
+                    15,
+                    TextAnchor.UpperCenter,
+                    tickTextColors[i],
+                    ""
+                );
+                debugFollowTickLabels[i] = tickLbl;
+                debugFollowTickLabelRects[i] = tickLbl.rectTransform;
+            }
+
+            // Driver Position Indicator Needle + Floating Distance Readout Above Needle
+            debugFollowDriverMarker = CreateDebugSolidRect(
+                "Driver_MarkerNeedle",
+                debugFollowBarTrack,
+                new Vector2(0f, 0.5f),
+                new Vector2(0f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                Vector2.zero,
+                new Vector2(4f, barTrackH + 16f),
+                new Color32(255, 255, 255, 255)
+            );
+
+            // Subtle dark halo behind the driver needle so it stands out on every zone color
+            RectTransform needleBorder = CreateDebugSolidRect(
+                "Driver_MarkerOutline",
+                debugFollowDriverMarker,
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                Vector2.zero,
+                new Vector2(8f, barTrackH + 18f),
+                new Color32(0, 0, 0, 210)
+            );
+            needleBorder.SetAsFirstSibling();
+
+            // Inner bright cyan core
+            CreateDebugSolidRect(
+                "Driver_MarkerCore",
+                debugFollowDriverMarker,
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                new Vector2(0.5f, 0.5f),
+                Vector2.zero,
+                new Vector2(4f, barTrackH + 16f),
+                new Color32(80, 245, 255, 255)
+            );
+
+            txtDebugFollowDriverDist = CreateHudText(
+                "Txt_DriverDistValue",
+                debugFollowBarTrack,
+                new Vector2(0f, 0.5f),
+                new Vector2(0.5f, 0f),
+                new Vector2(0f, barTrackH * 0.5f + 7f),
+                new Vector2(96f, 24f),
+                17,
+                TextAnchor.LowerCenter,
+                new Color32(80, 245, 255, 255),
+                "0.0m"
+            );
+            debugFollowDriverLabelRect = txtDebugFollowDriverDist.rectTransform;
+
+            // =================================================================
+            // 2. Destroy Target Car Damage Debug Panel (Crash Course EventType == 8)
+            // =================================================================
+            const float destroyPanelW = 368f;
+            const float destroyPanelH = 112f;
+            const float dmgBarW = 340f;
+            const float dmgBarH = 12f;
+
+            RectTransform destroyBg = CreateDebugSolidRect(
+                "Debug_DestroyCarPanel",
+                debugOverlayRoot,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                Vector2.zero,
+                new Vector2(destroyPanelW, destroyPanelH),
+                new Color32(6, 10, 24, 210)
+            );
+            debugDestroyPanel = destroyBg.gameObject;
+
+            // Player Car Damage Row
+            CreateHudText(
+                "Lbl_PlayerDmg",
+                destroyBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(14f, -10f),
+                new Vector2(210f, 26f),
+                20,
+                TextAnchor.UpperLeft,
+                new Color32(190, 215, 255, 255),
+                "PLAYER DAMAGE:"
+            );
+
+            txtDebugPlayerDmgValue = CreateHudText(
+                "Txt_PlayerDmgVal",
+                destroyBg,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(-14f, -10f),
+                new Vector2(130f, 26f),
+                20,
+                TextAnchor.UpperRight,
+                new Color32(45, 255, 75, 255),
+                "0.0%"
+            );
+
+            RectTransform playerBarBg = CreateDebugSolidRect(
+                "Bar_PlayerDmgBg",
+                destroyBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(14f, -38f),
+                new Vector2(dmgBarW, dmgBarH),
+                new Color32(24, 30, 48, 255)
+            );
+
+            debugPlayerDmgFill = CreateDebugSolidRect(
+                "Bar_PlayerDmgFill",
+                playerBarBg,
+                new Vector2(0f, 0f),
+                new Vector2(0f, 1f),
+                new Vector2(0f, 0.5f),
+                Vector2.zero,
+                new Vector2(0f, 0f),
+                new Color32(45, 225, 85, 255)
+            );
+
+            // Opponent Car Damage Row
+            CreateHudText(
+                "Lbl_OpponentDmg",
+                destroyBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(14f, -58f),
+                new Vector2(220f, 26f),
+                20,
+                TextAnchor.UpperLeft,
+                new Color32(230, 175, 255, 255),
+                "OPPONENT DAMAGE:"
+            );
+
+            txtDebugOpponentDmgValue = CreateHudText(
+                "Txt_OpponentDmgVal",
+                destroyBg,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(-14f, -58f),
+                new Vector2(130f, 26f),
+                20,
+                TextAnchor.UpperRight,
+                new Color32(255, 215, 60, 255),
+                "0.0%"
+            );
+
+            RectTransform oppBarBg = CreateDebugSolidRect(
+                "Bar_OpponentDmgBg",
+                destroyBg,
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(0f, 1f),
+                new Vector2(14f, -86f),
+                new Vector2(dmgBarW, dmgBarH),
+                new Color32(24, 30, 48, 255)
+            );
+
+            debugOpponentDmgFill = CreateDebugSolidRect(
+                "Bar_OpponentDmgFill",
+                oppBarBg,
+                new Vector2(0f, 0f),
+                new Vector2(0f, 1f),
+                new Vector2(0f, 0.5f),
+                Vector2.zero,
+                new Vector2(0f, 0f),
+                new Color32(210, 75, 255, 255)
+            );
+
+            debugFollowPanel.SetActive(false);
+            debugDestroyPanel.SetActive(false);
+            debugOverlayRoot.gameObject.SetActive(false);
+        }
+
+        private void UpdateDebugOverlay(ArcadeVehicleController car)
+        {
+            if (debugOverlayRoot == null) return;
+
+            MM2GameSession.EnsureSettingsLoaded();
+            if (!MM2GameSession.EnableDebugMode || car == null)
+            {
+                if (debugOverlayRoot.gameObject.activeSelf)
+                {
+                    debugOverlayRoot.gameObject.SetActive(false);
+                }
+                return;
+            }
+
+            // Position right below the FPS counter (or at top-right if FPS counter is hidden)
+            float topY = MM2GameSession.ShowFpsCounter ? -54f : -14f;
+            debugOverlayRoot.anchoredPosition = new Vector2(-18f, topY);
+
+            MM2RaceManager raceMgr = MM2RaceManager.Instance;
+            if (raceMgr == null)
+            {
+                if (debugOverlayRoot.gameObject.activeSelf)
+                {
+                    debugOverlayRoot.gameObject.SetActive(false);
+                }
+                return;
+            }
+
+            // Mode A: Crash Course "Follow That Car!" (Distance Window Bar)
+            if (raceMgr.TryGetCrashFollowDistanceDebugInfo(
+                    car.transform.position,
+                    out float curDist,
+                    out float failNear,
+                    out float warnNear,
+                    out float warnFar,
+                    out float failFar))
+            {
+                if (!debugOverlayRoot.gameObject.activeSelf) debugOverlayRoot.gameObject.SetActive(true);
+                if (!debugFollowPanel.activeSelf) debugFollowPanel.SetActive(true);
+                if (debugDestroyPanel.activeSelf) debugDestroyPanel.SetActive(false);
+
+                const float barTrackW = 440f;
+                const float barH = 16f;
+                float maxBarDist = Mathf.Max(failFar * 1.15f, failFar + 20f);
+
+                float xFailNear = Mathf.Clamp01(failNear / maxBarDist) * barTrackW;
+                float xWarnNear = Mathf.Clamp01(warnNear / maxBarDist) * barTrackW;
+                float xWarnFar = Mathf.Clamp01(warnFar / maxBarDist) * barTrackW;
+                float xFailFar = Mathf.Clamp01(failFar / maxBarDist) * barTrackW;
+
+                // Update the 5 colored zone segments along the bar
+                float[] segStarts = { 0f, xFailNear, xWarnNear, xWarnFar, xFailFar };
+                float[] segEnds = { xFailNear, xWarnNear, xWarnFar, xFailFar, barTrackW };
+                for (int i = 0; i < 5; i++)
+                {
+                    if (debugFollowZoneSegments[i] != null)
+                    {
+                        float sx = segStarts[i];
+                        float sw = Mathf.Max(0f, segEnds[i] - sx);
+                        debugFollowZoneSegments[i].anchoredPosition = new Vector2(sx, 0f);
+                        debugFollowZoneSegments[i].sizeDelta = new Vector2(sw, barH);
+                    }
+                }
+
+                // Update the 4 threshold tick marks and their numerical distance labels
+                float[] tickX = { xFailNear, xWarnNear, xWarnFar, xFailFar };
+                float[] tickVal = { failNear, warnNear, warnFar, failFar };
+                string[] tickTitle = { "FAIL", "WARN", "WARN", "FAIL" };
+
+                // Keep tick labels slightly separated horizontally if two ticks are very close (e.g. 8m and 25m)
+                float[] labelX = { xFailNear, xWarnNear, xWarnFar, xFailFar };
+                const float minLabelSpacing = 62f;
+                for (int i = 1; i < 4; i++)
+                {
+                    if (labelX[i] - labelX[i - 1] < minLabelSpacing)
+                    {
+                        labelX[i] = labelX[i - 1] + minLabelSpacing;
+                    }
+                }
+
+                for (int i = 0; i < 4; i++)
+                {
+                    if (debugFollowTickLines[i] != null)
+                    {
+                        debugFollowTickLines[i].anchoredPosition = new Vector2(tickX[i], 0f);
+                    }
+                    if (debugFollowTickLabelRects[i] != null)
+                    {
+                        debugFollowTickLabelRects[i].anchoredPosition = new Vector2(
+                            Mathf.Clamp(labelX[i], 18f, barTrackW - 18f),
+                            -(barH * 0.5f + 7f)
+                        );
+                    }
+                    if (debugFollowTickLabels[i] != null)
+                    {
+                        debugFollowTickLabels[i].text = $"{tickTitle[i]}\n{tickVal[i]:0.#}m";
+                    }
+                }
+
+                // Update Driver Indicator Position & Numerical Value
+                float xDriver = Mathf.Clamp(curDist / maxBarDist, 0f, 1f) * barTrackW;
+                if (debugFollowDriverMarker != null)
+                {
+                    debugFollowDriverMarker.anchoredPosition = new Vector2(xDriver, 0f);
+                }
+                if (debugFollowDriverLabelRect != null)
+                {
+                    debugFollowDriverLabelRect.anchoredPosition = new Vector2(
+                        Mathf.Clamp(xDriver, 24f, barTrackW - 24f),
+                        barH * 0.5f + 8f
+                    );
+                }
+                if (txtDebugFollowDriverDist != null)
+                {
+                    txtDebugFollowDriverDist.text = $"{curDist:0.0}m";
+                }
+
+                // Update top-right summary status & color
+                if (txtDebugFollowTitleValue != null)
+                {
+                    string zoneLabel;
+                    Color32 zoneColor;
+                    if (curDist < failNear)
+                    {
+                        zoneLabel = "SPOTTED!";
+                        zoneColor = new Color32(255, 75, 75, 255);
+                    }
+                    else if (curDist < warnNear)
+                    {
+                        zoneLabel = "TOO CLOSE";
+                        zoneColor = new Color32(255, 205, 55, 255);
+                    }
+                    else if (curDist <= warnFar)
+                    {
+                        zoneLabel = "OK";
+                        zoneColor = new Color32(45, 255, 75, 255);
+                    }
+                    else if (curDist <= failFar)
+                    {
+                        zoneLabel = "TOO FAR";
+                        zoneColor = new Color32(255, 205, 55, 255);
+                    }
+                    else
+                    {
+                        zoneLabel = "ESCAPING!";
+                        zoneColor = new Color32(255, 75, 75, 255);
+                    }
+
+                    txtDebugFollowTitleValue.color = zoneColor;
+                    txtDebugFollowTitleValue.text = $"{curDist:0.0}m ({zoneLabel})";
+                }
+                return;
+            }
+
+            // Mode B: Crash Course "Destroy Another Car" (EventType == 8)
+            if (raceMgr.TryGetCrashDestroyCarDebugInfo(
+                    car,
+                    out float playerDmgPct,
+                    out float oppDmgPct))
+            {
+                if (!debugOverlayRoot.gameObject.activeSelf) debugOverlayRoot.gameObject.SetActive(true);
+                if (debugFollowPanel.activeSelf) debugFollowPanel.SetActive(false);
+                if (!debugDestroyPanel.activeSelf) debugDestroyPanel.SetActive(true);
+
+                const float dmgBarW = 340f;
+                if (txtDebugPlayerDmgValue != null)
+                {
+                    txtDebugPlayerDmgValue.text = $"{playerDmgPct:0.0}%";
+                    txtDebugPlayerDmgValue.color = Color.Lerp(
+                        new Color32(45, 255, 75, 255),
+                        new Color32(255, 65, 65, 255),
+                        playerDmgPct / 100f
+                    );
+                }
+                if (debugPlayerDmgFill != null)
+                {
+                    debugPlayerDmgFill.sizeDelta = new Vector2(dmgBarW * Mathf.Clamp01(playerDmgPct / 100f), 0f);
+                }
+
+                if (txtDebugOpponentDmgValue != null)
+                {
+                    txtDebugOpponentDmgValue.text = $"{oppDmgPct:0.0}%";
+                    txtDebugOpponentDmgValue.color = Color.Lerp(
+                        new Color32(255, 215, 60, 255),
+                        new Color32(45, 255, 75, 255),
+                        oppDmgPct / 100f
+                    );
+                }
+                if (debugOpponentDmgFill != null)
+                {
+                    debugOpponentDmgFill.sizeDelta = new Vector2(dmgBarW * Mathf.Clamp01(oppDmgPct / 100f), 0f);
+                }
+                return;
+            }
+
+            // Neither debug event active -> hide overlay
+            if (debugOverlayRoot.gameObject.activeSelf)
+            {
+                debugOverlayRoot.gameObject.SetActive(false);
             }
         }
 
