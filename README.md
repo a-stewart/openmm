@@ -8,7 +8,7 @@
 
 ## Screenshots
 
-![San Francisco Cruise Gameplay](screenshots/san_francisco_cruise.jpg)
+![San Francisco Cruise Gameplay](screenshots/san_francisco_cruise.png)
 ![Crash Course Stunt Ramp Gameplay](screenshots/crash_course_jump.png)
 ![Races & Event Selection Menu](screenshots/races_menu.png)
 
