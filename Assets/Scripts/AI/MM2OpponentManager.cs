@@ -132,7 +132,8 @@ namespace MM2.AI
             IReadOnlyList<Vector3> checkpointPositions,
             IReadOnlyList<float> checkpointRadii,
             int numLaps,
-            IReadOnlyList<Quaternion> checkpointRotations = null)
+            IReadOnlyList<Quaternion> checkpointRotations = null,
+            int opponentStartIndex = 0)
         {
             ClearOpponents();
 
@@ -185,7 +186,7 @@ namespace MM2.AI
                 opponentsContainer = root.transform;
             }
 
-            SpawnOpponents(desiredOpponents);
+            SpawnOpponents(desiredOpponents, Mathf.Max(0, opponentStartIndex));
 
             Debug.Log($"[MM2OpponentManager] Initialized {activeOpponents.Count}/{desiredOpponents} opponents for {gameMode} race ({raceCheckpointPositions.Count} checkpoints, {totalLaps} laps).");
         }
@@ -238,7 +239,7 @@ namespace MM2.AI
             }
         }
 
-        private void SpawnOpponents(int count)
+        private void SpawnOpponents(int count, int opponentStartIndex = 0)
         {
             Vector3 playerStartPos = playerTransform != null ? playerTransform.position : Vector3.zero;
             Quaternion playerStartRot = playerTransform != null ? playerTransform.rotation : Quaternion.identity;
@@ -247,9 +248,10 @@ namespace MM2.AI
 
             for (int i = 0; i < count; i++)
             {
-                MM2AiMapData.OpponentDefinition def = (aiMap != null && i < aiMap.Opponents.Count)
-                    ? aiMap.Opponents[i]
-                    : null;
+                int defIdx = opponentStartIndex + i;
+                MM2AiMapData.OpponentDefinition def = (aiMap != null && defIdx < aiMap.Opponents.Count)
+                    ? aiMap.Opponents[defIdx]
+                    : ((aiMap != null && i < aiMap.Opponents.Count) ? aiMap.Opponents[i] : null);
 
                 if (isCrashCourse && (def == null || !def.HasValidStartPose))
                 {
@@ -960,12 +962,14 @@ namespace MM2.AI
                 ? routeSpeedLimit
                 : Mathf.Min(routeSpeedLimit, opp.BaseTopSpeed * throttleScale);
             float desiredSpeed = opp.HasFinished
-                ? 12f
+                ? (opp.DistanceAlongLap >= opp.TotalRouteLength + 16f ? 0f : 12f)
                 : (baseRouteSpeed * rubberBandMult);
 
             // 3. Check for slower vehicles ahead and adjust lateral offset to overtake cleanly
-            float targetLatOffset = opp.PreferredLateralOffset;
-            if (CheckForwardTrafficOrRacer(opp, routeFwd, routeRight, out float obstacleGap, out float obstacleSpeed, out float avoidSideOffset))
+            float targetLatOffset = opp.HasFinished && isCrashCourse
+                ? 2.4f
+                : opp.PreferredLateralOffset;
+            if (!opp.HasFinished && CheckForwardTrafficOrRacer(opp, routeFwd, routeRight, out float obstacleGap, out float obstacleSpeed, out float avoidSideOffset))
             {
                 targetLatOffset = Mathf.Clamp(opp.PreferredLateralOffset + avoidSideOffset, -3.2f, 3.2f);
                 if (obstacleGap < 7.5f)
@@ -1005,8 +1009,12 @@ namespace MM2.AI
                 }
                 else
                 {
-                    opp.DistanceAlongLap = opp.TotalRouteLength;
-                    opp.CurrentSpeed = Mathf.MoveTowards(opp.CurrentSpeed, 0f, 12f * dt);
+                    float maxRunoff = opp.TotalRouteLength + 18f;
+                    if (opp.DistanceAlongLap >= maxRunoff)
+                    {
+                        opp.DistanceAlongLap = maxRunoff;
+                        opp.CurrentSpeed = Mathf.MoveTowards(opp.CurrentSpeed, 0f, 12f * dt);
+                    }
                 }
             }
 
@@ -1194,6 +1202,12 @@ namespace MM2.AI
             right = Vector3.Slerp(n0.Right, n1.Right, t).normalized;
             up = Vector3.Slerp(n0.Up, n1.Up, t).normalized;
             speedLimit = Mathf.Lerp(n0.SpeedLimit, n1.SpeedLimit, t);
+
+            if (distance > opp.TotalRouteLength)
+            {
+                float extra = Mathf.Min(distance - opp.TotalRouteLength, 20f);
+                pos += new Vector3(fwd.x, 0f, fwd.z).normalized * extra;
+            }
         }
 
         private void UpdateOpponentVisuals(MM2OpponentAgent opp, float dt)

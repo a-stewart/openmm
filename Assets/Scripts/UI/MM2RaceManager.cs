@@ -105,6 +105,8 @@ namespace MM2.UI
         private MM2CrashLessonStage activeCrashStage;
         private bool crashHasCountdownTimer;
         private bool crashHasReachedMinSpeed;
+        private bool crashFollowTargetReachedFinish;
+        private float crashStageElapsedSeconds;
         private float crashBelowMinSpeedTimer;
         private float crashInitialDamage01;
         private float crashTransientBannerTimer;
@@ -622,6 +624,8 @@ namespace MM2.UI
             IsRaceActive = true;
             IsRaceFinished = false;
             crashHasReachedMinSpeed = false;
+            crashFollowTargetReachedFinish = false;
+            crashStageElapsedSeconds = 0f;
             crashBelowMinSpeedTimer = 0f;
             crashTransientBannerTimer = 0f;
 
@@ -632,10 +636,14 @@ namespace MM2.UI
             spawnPos = SnapToRoadSurface(startWp.Position, 0.55f);
             spawnRot = startWp.Rotation;
 
-            startHoldPosition = spawnPos;
-            startHoldRotation = spawnRot;
-            prevCarPosition = spawnPos;
-            hasPrevCarPosition = true;
+            bool isSeamlessContinuation = (stageIdx > 0);
+            if (!isSeamlessContinuation)
+            {
+                startHoldPosition = spawnPos;
+                startHoldRotation = spawnRot;
+                prevCarPosition = spawnPos;
+                hasPrevCarPosition = true;
+            }
 
             checkpointsWorldRoot = new GameObject($"MM2_CrashCheckpoints_L{activeCrashLesson.LessonIndex}_S{stageIdx}");
 
@@ -651,13 +659,14 @@ namespace MM2.UI
                                      !(activeCrashStage.EventType == 2 && activeCrashStage.TimeLimit <= 60f);
             DisplayTimeSeconds = crashHasCountdownTimer ? activeCrashStage.TimeLimit : 0f;
 
+            bool isLastStage = (stageIdx == activeCrashLesson.Stages.Length - 1);
             for (int i = 1; i < waypoints.Count; i++)
             {
                 int cpIdx = i - 1;
                 MM2RaceWaypoint wp = waypoints[i];
                 wp.Position = SnapToRoadSurface(wp.Position, 0f);
 
-                bool isFinish = (cpIdx == cpCount - 1);
+                bool isFinish = isLastStage && (cpIdx == cpCount - 1);
                 CheckpointNode node = SpawnCheckpointObject(cpIdx, wp, isFinish);
                 checkpoints.Add(node);
             }
@@ -670,16 +679,29 @@ namespace MM2.UI
                 ? activeCrashStage.AmbientDensity
                 : activeCrashLesson.TrafficDensity;
 
-            countdownElapsed = 0f;
-            countdownStage = 0;
-            IsCountdownLockActive = true;
-            CenterBannerText = GetCrashCountdownBanner(0);
             finishBannerTimer = 0f;
             lastWarningSecond = -1;
             playerFinishTime = 0f;
             PlayerPosition = 1;
             TotalRacers = 1;
-            PlayClip(sfxCountdownLow);
+
+            if (isSeamlessContinuation)
+            {
+                // Seamless multi-part exam continuation: no Ready/Set/Go lock; timer and next objective start immediately
+                countdownElapsed = 4.0f;
+                countdownStage = 3;
+                IsCountdownLockActive = false;
+                ShowCrashTransientBanner(GetCrashCountdownBanner(2), 2.5f);
+                PlayClip(sfxWaypoint);
+            }
+            else
+            {
+                countdownElapsed = 0f;
+                countdownStage = 0;
+                IsCountdownLockActive = true;
+                CenterBannerText = GetCrashCountdownBanner(0);
+                PlayClip(sfxCountdownLow);
+            }
             return true;
         }
 
@@ -1174,7 +1196,8 @@ namespace MM2.UI
                 cpRadii.Add(checkpoints[i].Waypoint.Radius);
             }
 
-            opponentManager.Initialize(currentAiMap, playerCarTransform, ActiveRaceType, cpPositions, cpRadii, TotalLaps, cpRotations);
+            int oppStartOffset = GetCrashStageOpponentOffset(activeCrashStageIndex);
+            opponentManager.Initialize(currentAiMap, playerCarTransform, ActiveRaceType, cpPositions, cpRadii, TotalLaps, cpRotations, oppStartOffset);
             trafficManager.Initialize(currentAiMap, playerCarTransform);
             specialTrafficManager.Initialize(currentAiMap, playerCarTransform, mapName, raceDir);
             pedestrianManager.Initialize(currentAiMap, playerCarTransform);
@@ -1189,6 +1212,56 @@ namespace MM2.UI
                 playerFinishTime,
                 out _
             );
+        }
+
+        private int GetCrashStageOpponentOffset(int stageIdx)
+        {
+            if (activeCrashLesson == null || activeCrashLesson.Stages == null || stageIdx <= 0)
+            {
+                return 0;
+            }
+            int offset = 0;
+            for (int i = 0; i < stageIdx && i < activeCrashLesson.Stages.Length; i++)
+            {
+                offset += Mathf.Max(0, activeCrashLesson.Stages[i].NumOpponents);
+            }
+            return offset;
+        }
+
+        private void TransitionAiSystemsForCrashStage(Transform playerCarTransform)
+        {
+            if (playerCarTransform == null || activeCrashLesson == null) return;
+
+            bool stageUsesPolice =
+                activeCrashStage.EventType == 3 ||
+                (currentAiMap != null && currentAiMap.PoliceSpawns.Count > 0 && activeCrashStage.NumOpponents == 0);
+            MM2GameSession.CopDensity = stageUsesPolice ? Mathf.Max(100, activeCrashLesson.CopDensity) : activeCrashLesson.CopDensity;
+            MM2GameSession.TrafficDensity = activeCrashStage.AmbientDensity > 0
+                ? activeCrashStage.AmbientDensity
+                : activeCrashLesson.TrafficDensity;
+            MM2GameSession.NumOpponents = activeCrashStage.NumOpponents;
+
+            if (opponentManager != null)
+            {
+                var cpPositions = new List<Vector3>(checkpoints.Count);
+                var cpRotations = new List<Quaternion>(checkpoints.Count);
+                var cpRadii = new List<float>(checkpoints.Count);
+                for (int i = 0; i < checkpoints.Count; i++)
+                {
+                    cpPositions.Add(checkpoints[i].Waypoint.Position);
+                    cpRotations.Add(checkpoints[i].Waypoint.Rotation);
+                    cpRadii.Add(checkpoints[i].Waypoint.Radius);
+                }
+
+                int oppStartOffset = GetCrashStageOpponentOffset(activeCrashStageIndex);
+                opponentManager.Initialize(currentAiMap, playerCarTransform, ActiveRaceType, cpPositions, cpRadii, TotalLaps, cpRotations, oppStartOffset);
+                TotalRacers = 1 + opponentManager.ActiveOpponents.Count;
+            }
+
+            if (policeManager != null)
+            {
+                policeManager.Initialize(currentAiMap, playerCarTransform);
+            }
         }
 
         private CheckpointNode SpawnCheckpointObject(int index, MM2RaceWaypoint wp, bool isFinishGate)
@@ -1467,6 +1540,7 @@ namespace MM2.UI
             // Update Race Timer (starts ticking once "Go" begins at countdownStage >= 2)
             if (countdownStage >= 2)
             {
+                crashStageElapsedSeconds += dt;
                 bool isBlitz = string.Equals(ActiveRaceType, "Blitz", StringComparison.OrdinalIgnoreCase);
                 bool countsDown = isBlitz || (isCrashCourse && crashHasCountdownTimer);
                 if (countsDown)
@@ -1605,7 +1679,17 @@ namespace MM2.UI
                         float dist = Vector3.Distance(currPos, targetOpp.transform.position);
                         bool hitByPlayer = targetOpp.Damage != null && targetOpp.Damage.WasHitByPlayer && dist < 14.0f;
 
-                        if (blitzElapsedSeconds > 4.0f)
+                        if (!crashFollowTargetReachedFinish &&
+                            (targetOpp.HasFinished ||
+                             (targetOpp.TotalRouteLength > 10f && targetOpp.DistanceAlongLap >= targetOpp.TotalRouteLength - 6f)))
+                        {
+                            crashFollowTargetReachedFinish = true;
+                            UpdateCrashCourseCheckpointVisibility();
+                            ShowCrashTransientBanner("Cross the finish line!", 2.5f);
+                            PlayClip(sfxLastWaypoint != null ? sfxLastWaypoint : sfxWaypoint);
+                        }
+
+                        if (!crashFollowTargetReachedFinish && crashStageElapsedSeconds > 4.0f)
                         {
                             if (dist < 8.0f || hitByPlayer)
                             {
@@ -1626,13 +1710,27 @@ namespace MM2.UI
                                 ShowCrashTransientBanner("Get Closer!", 0.5f);
                             }
                         }
-
-                        if (targetOpp.HasFinished ||
-                            (targetOpp.TotalRouteLength > 10f && targetOpp.DistanceAlongLap >= targetOpp.TotalRouteLength - 6f))
+                        else if (crashFollowTargetReachedFinish && dist > activeCrashStage.FollowDistFar * 2.15f)
                         {
-                            OnCrashStageCompleted("You Won!");
+                            TriggerCrashCourseFail("Car escaped!");
                             return;
                         }
+                    }
+                }
+
+                if (crashFollowTargetReachedFinish && checkpoints.Count > 0)
+                {
+                    CheckpointNode finishNode = checkpoints[checkpoints.Count - 1];
+                    if (!finishNode.IsCollected && DidCarPassThroughNode(finishNode, prevPos, currPos))
+                    {
+                        finishNode.IsCollected = true;
+                        if (finishNode.RootObject != null)
+                        {
+                            finishNode.RootObject.SetActive(false);
+                        }
+                        CollectedCheckpoints = TotalCheckpoints;
+                        OnCrashStageCompleted("You Won!");
+                        return;
                     }
                 }
                 return;
@@ -1741,27 +1839,19 @@ namespace MM2.UI
 
         private void OnCrashStageCompleted(string winBanner)
         {
-            // Check if this lesson has another stage (e.g. 2-stage Midterm 2 or Final Exam)
+            // Check if this lesson has another stage (e.g. 2-stage Midterm 2 or 3-stage Final Exam)
             if (activeCrashLesson != null &&
                 activeCrashLesson.Stages != null &&
                 activeCrashStageIndex + 1 < activeCrashLesson.Stages.Length)
             {
                 int nextStage = activeCrashStageIndex + 1;
-                if (SetupCrashCourseStage(nextStage, out Vector3 nextSpawnPos, out Quaternion nextSpawnRot))
+                if (SetupCrashCourseStage(nextStage, out _, out _))
                 {
+                    // Seamless continuation: keep vehicle position, velocity, and accumulated damage intact
                     ArcadeVehicleController car = FindActivePlayerCar();
                     if (car != null)
                     {
-                        if (car.VehicleDamage != null) car.VehicleDamage.ResetDamage();
-                        if (car.VehicleRigidbody != null)
-                        {
-                            car.VehicleRigidbody.linearVelocity = Vector3.zero;
-                            car.VehicleRigidbody.angularVelocity = Vector3.zero;
-                            car.VehicleRigidbody.position = nextSpawnPos;
-                            car.VehicleRigidbody.rotation = nextSpawnRot;
-                        }
-                        car.transform.SetPositionAndRotation(nextSpawnPos, nextSpawnRot);
-                        InitializeAiSystemsForSession(car.transform);
+                        TransitionAiSystemsForCrashStage(car.transform);
                     }
                     return;
                 }
@@ -2120,7 +2210,8 @@ namespace MM2.UI
 
             if (string.Equals(ActiveRaceType, "CrashCourse", StringComparison.OrdinalIgnoreCase))
             {
-                if (activeCrashStage.EventType == 2 || activeCrashStage.EventType == 8)
+                if (activeCrashStage.EventType == 8 ||
+                    (activeCrashStage.EventType == 2 && !crashFollowTargetReachedFinish))
                 {
                     return;
                 }
@@ -2170,7 +2261,8 @@ namespace MM2.UI
                     // Event 9 ("4. The Knowledge" in London) hides the HUD arrow to test landmark knowledge
                     return false;
                 }
-                if ((ev == 2 || ev == 8) && opponentManager != null && opponentManager.ActiveOpponents.Count > 0)
+                if ((ev == 8 || (ev == 2 && !crashFollowTargetReachedFinish)) &&
+                    opponentManager != null && opponentManager.ActiveOpponents.Count > 0)
                 {
                     MM2OpponentAgent targetOpp = opponentManager.ActiveOpponents[0];
                     if (targetOpp != null)
