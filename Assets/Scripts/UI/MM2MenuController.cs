@@ -190,6 +190,7 @@ namespace MM2.UI
         public int ResolutionWidth = 0;
         public int ResolutionHeight = 0;
         public bool EnableLiveMenuBackground = false;
+        public bool ShowFpsCounter = false;
     }
 
     /// <summary>
@@ -225,6 +226,7 @@ namespace MM2.UI
         public static int CrashSubMode = 0; // 0 = Training, 1 = Work Experience Blitz, 2 = Work Experience Checkpoint
         public static int CrashWorkRaceIndex = 0;
         public static bool EnableLiveMenuBackground = false;
+        public static bool ShowFpsCounter = false;
         public static int SavedDisplayIndex = -1;
         public static string SavedDisplayName = "";
         public static int SavedWindowMode = -1; // -1 = Default, 0 = FullScreenWindow, 1 = ExclusiveFullScreen, 2 = Windowed
@@ -314,6 +316,7 @@ namespace MM2.UI
                     if (data != null)
                     {
                         EnableLiveMenuBackground = data.EnableLiveMenuBackground;
+                        ShowFpsCounter = data.ShowFpsCounter;
                         SavedDisplayIndex = data.DisplayIndex;
                         SavedDisplayName = data.DisplayName ?? "";
                         SavedWindowMode = data.WindowMode;
@@ -366,7 +369,8 @@ namespace MM2.UI
                     WindowMode = SavedWindowMode >= 0 ? SavedWindowMode : WindowModeIndexFromFullScreenMode(Screen.fullScreenMode),
                     ResolutionWidth = SavedResolutionWidth > 0 ? SavedResolutionWidth : Screen.width,
                     ResolutionHeight = SavedResolutionHeight > 0 ? SavedResolutionHeight : Screen.height,
-                    EnableLiveMenuBackground = EnableLiveMenuBackground
+                    EnableLiveMenuBackground = EnableLiveMenuBackground,
+                    ShowFpsCounter = ShowFpsCounter
                 };
                 string json = JsonUtility.ToJson(data, true);
                 File.WriteAllText(path, json);
@@ -692,6 +696,7 @@ namespace MM2.UI
         private Image imgLiveUiCheckboxBox;
         private Image imgLiveUiCheckTick;
         private Text txtLiveUiCheckMark;
+        private Image imgFpsCheckboxBox;
         private Text txtOptionsBottomHelp;
         private readonly List<DisplayInfo> availableDisplays = new List<DisplayInfo>();
         private string[] displayLabels = { "1: Display 1" };
@@ -791,6 +796,7 @@ namespace MM2.UI
         private Transform showcaseCameraTransform;
         private Camera showcaseCamera;
         private RenderTexture showcaseRenderTex;
+        private AudioSource vehicleSelectAudioSource;
 
         // Live 3D San Francisco Menu Background (el_sharpimg_f + Frozen Airborne Car + Duotone Shader)
         private RawImage rawLiveMenuBg;
@@ -3928,7 +3934,8 @@ namespace MM2.UI
                 "• Display Monitor: Choose which connected screen (e.g. laptop panel or external monitor) displays the game.\n\n" +
                 "• Display Resolution: Select the rendering resolution for the game window.\n\n" +
                 "• Window Mode: Switch between Fullscreen Window, Exclusive Fullscreen, or Windowed.\n\n" +
-                "• Live UI Background: Renders a real-time 3D scene behind the menus instead of the static backdrop.",
+                "• Live UI Background: Renders a real-time 3D scene behind the menus instead of the static backdrop.\n\n" +
+                "• Show FPS Counter: Displays a real-time frames-per-second counter during gameplay.",
                 24f,
                 90f,
                 640f,
@@ -4052,6 +4059,44 @@ namespace MM2.UI
             {
                 CloseActiveDropdown();
                 ToggleLiveUiBackground();
+            });
+
+            // 5b. Checkbox: Enable / Disable FPS Counter (Disabled by default)
+            GameObject fpsChkRow = CreateUIObject("Row_ToggleFpsCounter", parent);
+            SetTopLeftRect(fpsChkRow.GetComponent<RectTransform>(), 910f, 560f, 860f, 64f);
+            Image fpsRowHit = fpsChkRow.AddComponent<Image>();
+            fpsRowHit.color = new Color(0f, 0f, 0f, 0f);
+
+            imgFpsCheckboxBox = CreateSpriteImage(
+                "Box_FpsCheckbox",
+                fpsChkRow.transform,
+                MM2GameSession.ShowFpsCounter ? spCheckboxCheckedGreen : spCheckboxUnchecked,
+                0f,
+                6f,
+                52f,
+                52f
+            );
+            imgFpsCheckboxBox.raycastTarget = false;
+
+            CreateShadowLabel(
+                "Lbl_FpsCheckbox",
+                fpsChkRow.transform,
+                "SHOW FPS COUNTER",
+                74f,
+                4f,
+                760f,
+                56f,
+                36,
+                TextAnchor.MiddleLeft,
+                Color.white
+            );
+
+            Button fpsChkBtn = fpsChkRow.AddComponent<Button>();
+            fpsChkBtn.targetGraphic = fpsRowHit;
+            fpsChkBtn.onClick.AddListener(() =>
+            {
+                CloseActiveDropdown();
+                ToggleFpsCounter();
             });
 
             // 6. Bottom-Left Navigation on Right Side: [ <-- BACK ]
@@ -4330,6 +4375,19 @@ namespace MM2.UI
             }
         }
 
+        private void ToggleFpsCounter()
+        {
+            MM2GameSession.ShowFpsCounter = !MM2GameSession.ShowFpsCounter;
+            MM2GameSession.SaveSettings();
+            RefreshOptionsUI();
+            if (txtOptionsBottomHelp != null)
+            {
+                txtOptionsBottomHelp.text = MM2GameSession.ShowFpsCounter
+                    ? "FPS counter enabled (saved to settings.json)."
+                    : "FPS counter disabled (saved to settings.json).";
+            }
+        }
+
         private void RefreshOptionsUI()
         {
             if (txtDisplayValue != null && idxDisplay >= 0 && idxDisplay < displayLabels.Length)
@@ -4359,6 +4417,10 @@ namespace MM2.UI
             if (txtLiveUiCheckMark != null)
             {
                 txtLiveUiCheckMark.gameObject.SetActive(false);
+            }
+            if (imgFpsCheckboxBox != null)
+            {
+                imgFpsCheckboxBox.sprite = MM2GameSession.ShowFpsCounter ? spCheckboxCheckedGreen : spCheckboxUnchecked;
             }
         }
 
@@ -5679,6 +5741,10 @@ namespace MM2.UI
         {
             CloseActiveDropdown();
             CloseActiveModal();
+            if (screen != MenuScreen.SelectVehicle)
+            {
+                StopVehicleSelectSfx();
+            }
             currentScreen = screen;
 
             panelMainMenu.SetActive(screen == MenuScreen.MainMenu);
@@ -6217,6 +6283,42 @@ namespace MM2.UI
             src.PlayOneShot(clip, 0.75f);
         }
 
+        private void StopVehicleSelectSfx()
+        {
+            if (vehicleSelectAudioSource != null && vehicleSelectAudioSource.isPlaying)
+            {
+                vehicleSelectAudioSource.Stop();
+            }
+        }
+
+        private void PlayVehicleSelectSfx(VehicleSpec spec)
+        {
+            StopVehicleSelectSfx();
+            if (spec == null) return;
+
+            string selectWave = !string.IsNullOrEmpty(spec.SelectAudioName)
+                ? spec.SelectAudioName
+                : (!string.IsNullOrEmpty(spec.BaseName) ? $"{spec.BaseName}_select" : null);
+            if (string.IsNullOrEmpty(selectWave)) return;
+
+            AudioClip clip = MM2RuntimeDecoders.LoadAudioClip(selectWave);
+            if (clip == null) return;
+
+            if (vehicleSelectAudioSource == null)
+            {
+                GameObject sfxGo = new GameObject("MM2_VehicleSelectAudio");
+                sfxGo.transform.SetParent(transform, false);
+                vehicleSelectAudioSource = sfxGo.AddComponent<AudioSource>();
+                vehicleSelectAudioSource.spatialBlend = 0f;
+                vehicleSelectAudioSource.playOnAwake = false;
+                vehicleSelectAudioSource.loop = false;
+            }
+
+            vehicleSelectAudioSource.clip = clip;
+            vehicleSelectAudioSource.volume = 0.8f;
+            vehicleSelectAudioSource.Play();
+        }
+
         private void AdjustDensity(ref int valueField, RectTransform fillBar, int delta)
         {
             SetDensity(ref valueField, fillBar, valueField + delta);
@@ -6262,6 +6364,11 @@ namespace MM2.UI
 
             RebuildTurntableCarModel();
             RefreshVehicleLockUI();
+
+            if (currentScreen == MenuScreen.SelectVehicle)
+            {
+                PlayVehicleSelectSfx(spec);
+            }
         }
 
         private void CycleVehicleColor(int dir)

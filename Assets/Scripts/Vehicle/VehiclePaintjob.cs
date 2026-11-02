@@ -46,6 +46,7 @@ namespace MM2.Vehicle
         public string IdleAudioName;
         public string DriveAudioName;
         public string HornAudioName;
+        public string SelectAudioName;
 
         // Physics tune parsed from tune/vehicle/<basename>.vehcarsim, .vehGyro, and .asNode
         public bool HasCarSim;
@@ -827,6 +828,24 @@ namespace MM2.Vehicle
         private static void PopulateAudioStemsFromArchive(VehicleSpec spec)
         {
             string baseLower = spec.BaseName.ToLowerInvariant();
+
+            // Resolve Select Vehicle screen sound (<basename>_select.22k.wav / .11k.wav in aud/aud22/ or aud/aud11/)
+            string[] selectCandidates =
+            {
+                $"{spec.BaseName}_select",
+                baseLower == "vpfire" ? "vpftruck_select" : null,
+                baseLower == "vpdblbus" ? "vpddbus_select" : null,
+                baseLower == "vphumvee" ? "vp4x4_select" : null
+            };
+            foreach (string selCand in selectCandidates)
+            {
+                if (!string.IsNullOrEmpty(selCand) && !string.IsNullOrEmpty(MM2ArchiveSystem.FindWavVirtualPath(selCand)))
+                {
+                    spec.SelectAudioName = selCand;
+                    break;
+                }
+            }
+
             bool preferMm2 = MM2RuntimePkgLoader.HasMm2PkgModel(spec.BaseName);
 
             if (preferMm2)

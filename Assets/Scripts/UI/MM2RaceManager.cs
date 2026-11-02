@@ -97,8 +97,9 @@ namespace MM2.UI
         private Vector3 prevCarPosition;
         private bool hasPrevCarPosition;
 
-        // Crash Course active lesson & stage state
+        // Crash Course & Cruise announcer speech state
         private AudioSource speechAudioSource;
+        private string lastPlayedCruiseSpeechStem;
         private MM2CrashLessonSpec activeCrashLesson;
         private int activeCrashStageIndex;
         private MM2CrashLessonStage activeCrashStage;
@@ -343,6 +344,10 @@ namespace MM2.UI
         {
             ClearSpawnedCheckpoints();
             EnsureAssetsLoaded();
+            if (speechAudioSource != null)
+            {
+                speechAudioSource.Stop();
+            }
 
             IsSinkingInWater = false;
             isImmersedInWaterPhysics = false;
@@ -390,6 +395,7 @@ namespace MM2.UI
                 ActiveRaceType = "Cruise";
                 CenterBannerText = string.Empty;
                 IsCountdownLockActive = false;
+                PlayCruiseIntroSpeech(spec);
                 return;
             }
 
@@ -416,6 +422,7 @@ namespace MM2.UI
                 ActiveRaceType = "Cruise";
                 CenterBannerText = string.Empty;
                 IsCountdownLockActive = false;
+                PlayCruiseIntroSpeech(spec);
                 return;
             }
 
@@ -441,6 +448,7 @@ namespace MM2.UI
                 ActiveRaceType = "Cruise";
                 CenterBannerText = string.Empty;
                 IsCountdownLockActive = false;
+                PlayCruiseIntroSpeech(spec);
                 return;
             }
 
@@ -705,6 +713,306 @@ namespace MM2.UI
             speechAudioSource.Stop();
             speechAudioSource.clip = clip;
             speechAudioSource.Play();
+        }
+
+        /// <summary>
+        /// Plays a random pre-session announcer voice clip when starting in Cruise mode:
+        /// - Reads MM2 city announcer configs (`aud/spchdata/&lt;city&gt;.csv`) and collects clips from
+        ///   `cruise.csv`, weather (`weaclr_prerace.csv`, `weacldy_prerace.csv`, `weafog_prerace.csv`, `wearain_prerace.csv`),
+        ///   time of day (`timemorn_prerace.csv`, `timenoon_prerace.csv`, `timeeve_prerace.csv`, `timenight_prerace.csv`),
+        ///   and vehicle (`&lt;vehicle&gt;_prerace.csv`) — including `AS1WeaClr02` ("The sun is out, the streets are dry,
+        ///   and there's an eerie calm throughout the city... until now.").
+        /// - Supports MM1 Chicago announcer clips (`ACRUISEMODE*`, `AWEACLEAR*`, `AWEACLOUDY*`, `AWEARAIN*`, `AWEASNOW*`,
+        ///   `ATIMEMORN*`, `ATIMENOON*`, `ATIMESUN*`, `ATIMENIGHT*`) when `audio.ar` is mounted.
+        /// - Gracefully degrades on custom mod cities or partial archive installs.
+        /// </summary>
+        private void PlayCruiseIntroSpeech(CitySpec spec)
+        {
+            if (speechAudioSource == null) return;
+
+            string mapName = (spec != null && !string.IsNullOrEmpty(spec.MapName))
+                ? spec.MapName.Trim().ToLowerInvariant()
+                : (MM2GameSession.SelectedCityCode ?? "sf").Trim().ToLowerInvariant();
+            if (mapName == "sanfrancisco") mapName = "sf";
+
+            int weatherIdx = MM2EnvironmentManager.ParseWeatherIndex(MM2GameSession.Weather);
+            int todIdx = MM2EnvironmentManager.ParseTimeOfDayIndex(MM2GameSession.TimeOfDay);
+
+            string weatherCsv = weatherIdx switch
+            {
+                1 => "weacldy_prerace.csv",
+                2 => "weafog_prerace.csv",
+                3 => "wearain_prerace.csv",
+                _ => "weaclr_prerace.csv"
+            };
+
+            string todCsv = todIdx switch
+            {
+                0 => "timemorn_prerace.csv",
+                2 => "timeeve_prerace.csv",
+                3 => "timenight_prerace.csv",
+                _ => "timenoon_prerace.csv"
+            };
+
+            VehicleSpec vehSpec = VehicleCatalog.GetSpec(MM2GameSession.VehicleName);
+            string vehSpeechBase = MapVehicleBaseToPreraceCsvBase(vehSpec != null ? vehSpec.BaseName : null);
+            string vehCsv = !string.IsNullOrEmpty(vehSpeechBase) ? $"{vehSpeechBase}_prerace.csv" : null;
+
+            var candidates = new List<string>(64);
+
+            // 1. Check MM2 aud/spchdata/<city>.csv for the active city
+            if (TryGetCityAnnouncerConfig(mapName, out string annPrefix, out int numAnnouncers))
+            {
+                CollectMm2AnnouncerCruiseClips(
+                    annPrefix,
+                    numAnnouncers,
+                    includeCityCruiseCsv: true,
+                    weatherCsv,
+                    todCsv,
+                    vehCsv,
+                    candidates
+                );
+            }
+            else if ((!MM2ArchiveSystem.FileExists($"city/{mapName}.psdl") && MM2ArchiveSystem.FileExists($"city/{mapName}.ptl")) || mapName == "chicago")
+            {
+                // 2. MM1 city (e.g. Chicago in audio.ar)
+                CollectMm1CruiseClips(includeCityCruiseClips: true, weatherIdx, todIdx, candidates);
+            }
+
+            // 3. Fallback for custom community mod cities (or if the city's own announcer clips aren't installed):
+            //    use city-neutral weather, time-of-day, and vehicle pre-race clips from installed MM2/MM1 archives.
+            if (candidates.Count == 0)
+            {
+                if (TryGetCityAnnouncerConfig("sf", out string sfPrefix, out int sfCount))
+                {
+                    CollectMm2AnnouncerCruiseClips(sfPrefix, sfCount, includeCityCruiseCsv: false, weatherCsv, todCsv, vehCsv, candidates);
+                }
+                if (TryGetCityAnnouncerConfig("london", out string lonPrefix, out int lonCount))
+                {
+                    CollectMm2AnnouncerCruiseClips(lonPrefix, lonCount, includeCityCruiseCsv: false, weatherCsv, todCsv, vehCsv, candidates);
+                }
+                if (candidates.Count == 0)
+                {
+                    CollectMm1CruiseClips(includeCityCruiseClips: false, weatherIdx, todIdx, candidates);
+                }
+            }
+
+            if (candidates.Count == 0) return;
+
+            string chosen = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+            if (candidates.Count > 1 && string.Equals(chosen, lastPlayedCruiseSpeechStem, StringComparison.OrdinalIgnoreCase))
+            {
+                for (int attempt = 0; attempt < 4; attempt++)
+                {
+                    string alt = candidates[UnityEngine.Random.Range(0, candidates.Count)];
+                    if (!string.Equals(alt, lastPlayedCruiseSpeechStem, StringComparison.OrdinalIgnoreCase))
+                    {
+                        chosen = alt;
+                        break;
+                    }
+                }
+            }
+
+            lastPlayedCruiseSpeechStem = chosen;
+            PlayCrashSpeechClip(chosen);
+        }
+
+        private static bool TryGetCityAnnouncerConfig(string cityCode, out string prefix, out int numAnnouncers)
+        {
+            prefix = string.Empty;
+            numAnnouncers = 0;
+            if (string.IsNullOrEmpty(cityCode)) return false;
+
+            string csv = MM2ArchiveSystem.ReadFileText($"aud/spchdata/{cityCode}.csv");
+            if (string.IsNullOrEmpty(csv)) return false;
+
+            string[] lines = csv.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.StartsWith("Num announcers", StringComparison.OrdinalIgnoreCase) && i + 1 < lines.Length)
+                {
+                    int.TryParse(
+                        lines[i + 1].Trim(),
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out numAnnouncers
+                    );
+                }
+                else if (line.StartsWith("prefix", StringComparison.OrdinalIgnoreCase) && i + 1 < lines.Length)
+                {
+                    prefix = lines[i + 1].Trim();
+                }
+            }
+
+            return !string.IsNullOrEmpty(prefix) && numAnnouncers > 0;
+        }
+
+        private static void CollectMm2AnnouncerCruiseClips(
+            string prefix,
+            int numAnnouncers,
+            bool includeCityCruiseCsv,
+            string weatherCsv,
+            string todCsv,
+            string vehCsv,
+            List<string> outCandidates
+        )
+        {
+            for (int a = 1; a <= numAnnouncers; a++)
+            {
+                string annTag = $"{prefix}{a}";
+                string annDir = annTag.ToLowerInvariant();
+
+                if (includeCityCruiseCsv)
+                {
+                    AppendSpchDataCsvClips(annTag, $"aud/spchdata/{annDir}/cruise.csv", outCandidates);
+                }
+                if (!string.IsNullOrEmpty(weatherCsv))
+                {
+                    AppendSpchDataCsvClips(annTag, $"aud/spchdata/{annDir}/{weatherCsv}", outCandidates);
+                }
+                if (!string.IsNullOrEmpty(todCsv))
+                {
+                    AppendSpchDataCsvClips(annTag, $"aud/spchdata/{annDir}/{todCsv}", outCandidates);
+                }
+                if (!string.IsNullOrEmpty(vehCsv))
+                {
+                    AppendSpchDataCsvClips(annTag, $"aud/spchdata/{annDir}/{vehCsv}", outCandidates);
+                }
+            }
+        }
+
+        private static void AppendSpchDataCsvClips(string annTag, string virtualCsvPath, List<string> outCandidates)
+        {
+            string csv = MM2ArchiveSystem.ReadFileText(virtualCsvPath);
+            if (string.IsNullOrEmpty(csv)) return;
+
+            string[] lines = csv.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string[] cols = lines[i].Split(',');
+                if (cols.Length < 2) continue;
+
+                string key = cols[0].Trim();
+                if (string.IsNullOrEmpty(key) ||
+                    key.StartsWith("Name prefix", StringComparison.OrdinalIgnoreCase) ||
+                    key.EndsWith("header", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!int.TryParse(
+                        cols[1].Trim(),
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out int endSuffix) ||
+                    endSuffix <= 0)
+                {
+                    continue;
+                }
+
+                int suffixAdd = 0;
+                if (cols.Length >= 3)
+                {
+                    int.TryParse(
+                        cols[2].Trim(),
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out suffixAdd
+                    );
+                }
+
+                for (int n = 1; n <= endSuffix; n++)
+                {
+                    string stem = $"{annTag}{key}{n + suffixAdd:D2}";
+                    if (MM2ArchiveSystem.FindWavVirtualPath(stem) != null)
+                    {
+                        outCandidates.Add(stem);
+                    }
+                    else if (key.Equals("WEAFOG", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Handle AL5Weasfog01/02 filename typo in retail mm2audex.ar
+                        string typoStem = $"{annTag}Weasfog{n + suffixAdd:D2}";
+                        if (MM2ArchiveSystem.FindWavVirtualPath(typoStem) != null)
+                        {
+                            outCandidates.Add(typoStem);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void CollectMm1CruiseClips(
+            bool includeCityCruiseClips,
+            int weatherIdx,
+            int todIdx,
+            List<string> outCandidates
+        )
+        {
+            if (includeCityCruiseClips)
+            {
+                AppendExistingNumberedStems("ACRUISEMODE", 1, 5, outCandidates);
+            }
+
+            switch (weatherIdx)
+            {
+                case 1:
+                    AppendExistingNumberedStems("AWEACLOUDY", 1, 3, outCandidates);
+                    AppendExistingNumberedStems("AWEACLOUD", 4, 5, outCandidates);
+                    break;
+                case 2:
+                    AppendExistingNumberedStems("AWEARAIN", 1, 5, outCandidates);
+                    break;
+                case 3:
+                    AppendExistingNumberedStems("AWEARAIN", 1, 5, outCandidates);
+                    AppendExistingNumberedStems("AWEASNOW", 1, 5, outCandidates);
+                    break;
+                default:
+                    AppendExistingNumberedStems("AWEACLEAR", 1, 5, outCandidates);
+                    break;
+            }
+
+            switch (todIdx)
+            {
+                case 0:
+                    AppendExistingNumberedStems("ATIMEMORN", 1, 4, outCandidates);
+                    break;
+                case 2:
+                    AppendExistingNumberedStems("ATIMESUN", 1, 2, outCandidates);
+                    break;
+                case 3:
+                    AppendExistingNumberedStems("ATIMENIGHT", 1, 3, outCandidates);
+                    break;
+                default:
+                    AppendExistingNumberedStems("ATIMENOON", 1, 3, outCandidates);
+                    break;
+            }
+        }
+
+        private static void AppendExistingNumberedStems(string prefix, int startIdx, int endIdx, List<string> outCandidates)
+        {
+            for (int n = startIdx; n <= endIdx; n++)
+            {
+                string stem = $"{prefix}{n:D2}";
+                if (MM2ArchiveSystem.FindWavVirtualPath(stem) != null)
+                {
+                    outCandidates.Add(stem);
+                }
+            }
+        }
+
+        private static string MapVehicleBaseToPreraceCsvBase(string baseName)
+        {
+            if (string.IsNullOrEmpty(baseName)) return null;
+            string lower = baseName.Trim().ToLowerInvariant();
+            return lower switch
+            {
+                "vpdblbus" => "vpddbus",
+                "vphumvee" => "vp4x4",
+                "vpfire" => "vpsemi",
+                "vpvwcup" => "vpbug",
+                _ => lower
+            };
         }
 
         /// <summary>

@@ -385,7 +385,7 @@ namespace MM2.Vehicle
         {
             ManualNumGears = Mathf.Clamp(cfg.TransManualNumGears, 4, 8);
             AutoNumGears = Mathf.Clamp(cfg.TransAutoNumGears, 4, 8);
-            ReverseMph = Mathf.Max(10f, cfg.TransReverse);
+            ReverseMph = Mathf.Max(28f, cfg.TransReverse);
             LowMph = Mathf.Max(10f, cfg.TransLow);
             HighMph = Mathf.Max(LowMph + 20f, cfg.TransHigh);
             GearBias = cfg.TransGearBias;
@@ -1134,12 +1134,12 @@ namespace MM2.Vehicle
             float dragForce = (avgTireDragCoef * cfg.Mass * 0.032f) * speedSq;
 
             // Effective translational mass M_eff = Mass + M_rot:
-            // In 1st gear (CurrentGear == 2), launch wheelspin/clutch slip decouples excess gear reduction above ~8.0
-            // so short-1st-gear vehicles (e.g. vpcab with G1 = 23.1) do not accumulate 6,600 kg of phantom inertia.
-            bool isFirstGear = trans.CurrentGear == 2;
-            float effectiveGearForInertia = isFirstGear ? Mathf.Min(absGearRatio, 7.2f) : absGearRatio;
+            // In 1st gear (CurrentGear == 2) and Reverse (CurrentGear == 0), launch wheelspin/clutch slip decouples
+            // excess gear reduction above ~7.2 so short-geared vehicles (e.g. vpcab) accelerate briskly in both 1st and Reverse.
+            bool isFirstOrReverse = trans.CurrentGear == 2 || trans.CurrentGear == 0;
+            float effectiveGearForInertia = isFirstOrReverse ? Mathf.Min(absGearRatio, 7.2f) : absGearRatio;
             float massInertiaScale = Mathf.Clamp(cfg.Mass / 1400f, 0.55f, 1.50f);
-            float dtRefStep = (1.0f / 46.0f) * massInertiaScale * (isFirstGear ? 0.35f : 1.0f);
+            float dtRefStep = (1.0f / 46.0f) * massInertiaScale * (isFirstOrReverse ? 0.35f : 1.0f);
 
             float rotMassKg = (0.82f * engine.AngInertia * effectiveGearForInertia * effectiveGearForInertia +
                                (cfg.DrivetrainAngInertia + cfg.FreetrainAngInertia) * dtRefStep) / (r * r);

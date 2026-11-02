@@ -94,6 +94,9 @@ namespace MM2.Vehicle
         private float discreteSteerState;
         private float fullLockDriftFactor;
         private float sustainedTurnDrift;
+        private float handbrakeEntryMoveSign;
+        private float handbrakeSpinSign;
+        private Vector3 handbrakeEntryForward;
         private ParticleSystem tireSmokeRL;
         private ParticleSystem tireSmokeRR;
 
@@ -856,17 +859,44 @@ namespace MM2.Vehicle
             if (isHandbrakeActive)
             {
                 // Lock rear wheels using MM2 HandbrakeCoef while keeping front wheels unbraked when steering
-                // so the front axle acts as a crisp pivot for 90/180-degree handbrake turns.
+                // so the vehicle pivots cleanly for 90-degree slides, 180-degree forward flicks, and reverse J-turns.
                 SetDriveTorque(0f);
-                rearLeftCollider.brakeTorque = Mathf.Max(brakeTorque * 1.5f, simWheels[2].CurrentBrakeTorque);
-                rearRightCollider.brakeTorque = Mathf.Max(brakeTorque * 1.5f, simWheels[3].CurrentBrakeTorque);
 
-                bool isSteeringHandbrake = Mathf.Abs(rawSteerInput) > 0.10f && horizSpeed > 2.0f;
+                bool isSteeringHandbrake = Mathf.Abs(rawSteerInput) > 0.10f && horizSpeed > 1.2f;
+                bool isReverseSpin = handbrakeEntryMoveSign < 0f || (handbrakeEntryMoveSign == 0f && Vector3.Dot(vel, transform.forward) < -0.8f);
+
+                // In a reverse J-turn, leave the wheels unbraked while spinning so linear travel speed is preserved
+                float rearHbBrake = (isSteeringHandbrake && isReverseSpin)
+                    ? 0f
+                    : Mathf.Max(brakeTorque * 1.5f, simWheels[2].CurrentBrakeTorque);
+                rearLeftCollider.brakeTorque = rearHbBrake;
+                rearRightCollider.brakeTorque = rearHbBrake;
+
                 float frontHbBrake = isSteeringHandbrake ? 0f : (brakeTorque * 0.35f);
                 if (frontLeftCollider != null) frontLeftCollider.brakeTorque = frontHbBrake;
                 if (frontRightCollider != null) frontRightCollider.brakeTorque = frontHbBrake;
 
-                SetRearWheelStiffness(isSteeringHandbrake ? 0.22f : handbrakeDriftStiffness);
+                if (isSteeringHandbrake)
+                {
+                    SetRearWheelStiffness(0.18f);
+                    if (isReverseSpin)
+                    {
+                        // Reduce front lateral grip during reverse J-turns so the trailing front axle whips around freely
+                        SetFrontWheelStiffness(0.20f);
+                    }
+                    else
+                    {
+                        Vector3 fwdHoriz = new Vector3(transform.forward.x, 0f, transform.forward.z).normalized;
+                        float spunDeg = handbrakeEntryForward.sqrMagnitude > 0.5f ? Vector3.Angle(handbrakeEntryForward, fwdHoriz) : 0f;
+                        float frontSpinStiff = Mathf.Lerp(frontSidewaysGripStiffness, 0.22f, Mathf.InverseLerp(30f, 75f, spunDeg));
+                        SetFrontWheelStiffness(frontSpinStiff);
+                    }
+                }
+                else
+                {
+                    SetRearWheelStiffness(handbrakeDriftStiffness);
+                    SetFrontWheelStiffness(frontSidewaysGripStiffness);
+                }
 
                 if (isGrounded && horizSpeed > 0.25f)
                 {
@@ -886,6 +916,7 @@ namespace MM2.Vehicle
                 // Normal Driving, Smooth Cornering Slide, Braking & Off-Throttle Speed Decay
                 float dynamicRearStiff = Mathf.Lerp(rearSidewaysGripStiffness, rearSidewaysGripStiffness * 0.50f, fullLockDriftFactor);
                 SetRearWheelStiffness(dynamicRearStiff);
+                SetFrontWheelStiffness(frontSidewaysGripStiffness);
 
                 float forwardSpeed = Vector3.Dot(vel, transform.forward);
                 bool hasThrottleInput = Mathf.Abs(currentThrottle) > 0.05f;
@@ -1010,11 +1041,15 @@ namespace MM2.Vehicle
                             }
                         }
 
+                        float maxReverseMph = Mathf.Max(
+                            34f,
+                            simTrans.ReverseMph * Mathf.Clamp(simEngine.MaxRPM / Mathf.Max(1000f, simEngine.OptRPM), 1.25f, 1.55f)
+                        );
                         if (currentThrottle > 0f && currentSpeedMph >= maxSpeedMph)
                         {
                             driveAccel = Mathf.Min(0f, driveAccel);
                         }
-                        else if (currentThrottle < 0f && currentSpeedMph >= simTrans.ReverseMph)
+                        else if (currentThrottle < 0f && currentSpeedMph >= maxReverseMph)
                         {
                             driveAccel = Mathf.Max(0f, driveAccel);
                         }
@@ -1160,8 +1195,9 @@ namespace MM2.Vehicle
 
             // 1. Gentle Lateral Tire Damping (no direct velocity rotation so the car never feels "on rails"):
             // Relaxes smoothly as steering angle increases at speed so the rear tires can naturally step out into a slide.
+            bool isSteeringHb = isHandbrakeActive && Mathf.Abs(rawSteerInput) > 0.08f && horizSpeed > 1.2f;
             float baseGrip = isHandbrakeActive
-                ? (lateralGripAssist * 0.15f)
+                ? (isSteeringHb ? (lateralGripAssist * 0.03f) : (lateralGripAssist * 0.15f))
                 : Mathf.Lerp(lateralGripAssist, lateralGripAssist * 0.18f, fullLockDriftFactor);
             float gripRate = baseGrip * fricScale;
             float maxLatCorrection = Mathf.Abs(lateralVel) / Time.fixedDeltaTime;
@@ -1178,68 +1214,137 @@ namespace MM2.Vehicle
             }
 
             float absSteer = Mathf.Abs(currentSteer);
-            if (isHandbrakeActive && horizSpeed > 1.5f)
+            if (isHandbrakeActive && horizSpeed > 1.2f)
             {
-                // Handbrake Turn (90-degree intersection slide / J-turn):
-                // 1. Whip the tail around quickly (~105-120 deg/s) while steering is held, and arrest rotation when steering is released.
-                float currentYawRad = Vector3.Dot(rb.angularVelocity, Vector3.up);
-                if (Mathf.Abs(rawSteerInput) > 0.08f)
+                // Latch entry travel direction (+1 forward, -1 reverse) and entry heading when handbrake spin begins
+                // so the yaw direction never flips mid-spin when crossing 90 degrees during a 180-degree flick or reverse J-turn.
+                if (handbrakeEntryMoveSign == 0f)
                 {
-                    float moveSign = (forwardVel >= -1.5f) ? 1f : -1f;
-                    float speedYawScale = Mathf.Clamp01((horizSpeed - 1.5f) / 8.0f);
-                    float targetHbYawRad = Mathf.Sign(rawSteerInput) * moveSign * Mathf.Lerp(1.45f, 2.05f, absSteer) * speedYawScale;
-                    float hbYawAccel = Mathf.Clamp((targetHbYawRad - currentYawRad) * 9.5f, -12.0f, 12.0f);
+                    handbrakeEntryMoveSign = (forwardVel < -0.8f) ? -1f : 1f;
+                    handbrakeEntryForward = fwd;
+                    handbrakeSpinSign = (Mathf.Abs(rawSteerInput) > 0.08f)
+                        ? (Mathf.Sign(rawSteerInput) * handbrakeEntryMoveSign)
+                        : 0f;
+                }
+
+                float spunAngleDeg = (handbrakeEntryForward.sqrMagnitude > 0.5f)
+                    ? Vector3.Angle(handbrakeEntryForward, fwd)
+                    : 0f;
+
+                if (Mathf.Abs(rawSteerInput) > 0.08f && (handbrakeSpinSign == 0f || spunAngleDeg < 55f))
+                {
+                    handbrakeSpinSign = Mathf.Sign(rawSteerInput) * handbrakeEntryMoveSign;
+                }
+
+                // Handbrake Turn (90-degree slide, full 180-degree forward flick, and 180-degree reverse J-turn):
+                // 1. Whip the vehicle around briskly while steering is held, tapering smoothly as it reaches 180 degrees.
+                float currentYawRad = Vector3.Dot(rb.angularVelocity, Vector3.up);
+                if (Mathf.Abs(rawSteerInput) > 0.08f && handbrakeSpinSign != 0f)
+                {
+                    bool isReverseJTurn = handbrakeEntryMoveSign < 0f;
+                    float speedYawScale = isReverseJTurn
+                        ? Mathf.Clamp01((horizSpeed - 1.0f) / 5.0f)
+                        : Mathf.Clamp01((horizSpeed - 1.5f) / 7.0f);
+                    float maxSpinYawRad = isReverseJTurn
+                        ? Mathf.Lerp(2.90f, 3.85f, absSteer)
+                        : Mathf.Lerp(2.45f, 3.45f, absSteer);
+
+                    // Smoothly arrest rotation as the spin completes 180 degrees from the entry heading
+                    float spinCompletionFactor = 1.0f - Mathf.SmoothStep(152f, 178f, spunAngleDeg);
+                    float targetHbYawRad = handbrakeSpinSign * maxSpinYawRad * speedYawScale * spinCompletionFactor;
+                    float hbYawGain = isReverseJTurn ? 14.0f : 12.5f;
+                    float maxHbYawAccel = isReverseJTurn ? 18.0f : 16.0f;
+                    float hbYawAccel = Mathf.Clamp((targetHbYawRad - currentYawRad) * hbYawGain, -maxHbYawAccel, maxHbYawAccel);
                     rb.AddTorque(Vector3.up * hbYawAccel, ForceMode.Acceleration);
                 }
                 else
                 {
-                    rb.AddTorque(Vector3.up * (-currentYawRad * 6.0f), ForceMode.Acceleration);
+                    rb.AddTorque(Vector3.up * (-currentYawRad * 7.5f), ForceMode.Acceleration);
                 }
 
-                // 2. Scrub sideways velocity across the intersection (~75-85 mph -> 54 -> 32 -> 21 mph)
-                // while redirecting part of the entry momentum into ~20-23 mph of forward roll along the new street heading.
+                // 2. Manage linear velocity across 90-degree turns, 180-degree forward flicks, and reverse J-turns:
                 float slideRatio = Mathf.Clamp01(absLatVel / Mathf.Max(2.0f, horizSpeed));
-                float broadsideDrag = Mathf.Lerp(handbrakeDecelAssist * 0.70f, 19.5f, slideRatio) * fricScale;
-                rb.AddForce((-horizVel / horizSpeed) * broadsideDrag, ForceMode.Acceleration);
-
-                if (absLatVel > 1.5f)
+                if (handbrakeEntryMoveSign < 0f)
                 {
-                    float extraLatScrub = -lateralVel * 1.45f * fricScale;
-                    rb.AddForce(right * extraLatScrub, ForceMode.Acceleration);
-                }
+                    // Reverse J-Turn: keep linear drag very light so travel momentum along the street is preserved
+                    float revDrag = 2.0f * fricScale;
+                    rb.AddForce((-horizVel / horizSpeed) * revDrag, ForceMode.Acceleration);
 
-                if (Mathf.Abs(rawSteerInput) > 0.08f && absLatVel > 2.2f)
-                {
-                    float targetExitForwardMs = Mathf.Min(9.8f, horizSpeed * 0.75f);
-                    if (forwardVel < targetExitForwardMs)
+                    // Once the nose has swung past 105 degrees to face the travel direction, align velocity forward and shift to 1st gear
+                    if (spunAngleDeg > 105f)
                     {
-                        float forwardRedirect = Mathf.Clamp((targetExitForwardMs - forwardVel) * 2.2f, 0f, absLatVel * 0.90f) * fricScale;
-                        rb.AddForce(fwd * forwardRedirect, ForceMode.Acceleration);
+                        if (simTrans.CurrentGear <= 1)
+                        {
+                            simTrans.SetCurrentGear(2);
+                        }
+                        if (absLatVel > 0.8f)
+                        {
+                            rb.AddForce(right * (-lateralVel * 2.5f * fricScale), ForceMode.Acceleration);
+                        }
+                        float targetExitForwardMs = Mathf.Min(11.5f, horizSpeed * 0.88f);
+                        if (forwardVel < targetExitForwardMs)
+                        {
+                            float forwardRedirect = Mathf.Clamp((targetExitForwardMs - forwardVel) * 3.0f, 0f, absLatVel * 1.1f + 3.5f) * fricScale;
+                            rb.AddForce(fwd * forwardRedirect, ForceMode.Acceleration);
+                        }
+                    }
+                }
+                else
+                {
+                    // Forward Handbrake Turn / 180-Degree Flick:
+                    // Moderate broadside drag so the car retains enough speed to complete a full 180-degree spin when held
+                    float broadsideDrag = Mathf.Lerp(4.2f, 9.5f, slideRatio) * fricScale;
+                    rb.AddForce((-horizVel / horizSpeed) * broadsideDrag, ForceMode.Acceleration);
+
+                    if (spunAngleDeg < 80f)
+                    {
+                        if (absLatVel > 1.5f)
+                        {
+                            float extraLatScrub = -lateralVel * 0.85f * fricScale;
+                            rb.AddForce(right * extraLatScrub, ForceMode.Acceleration);
+                        }
+
+                        if (Mathf.Abs(rawSteerInput) > 0.08f && absLatVel > 2.2f && forwardVel > 0f)
+                        {
+                            float targetExitForwardMs = Mathf.Min(9.8f, horizSpeed * 0.75f);
+                            if (forwardVel < targetExitForwardMs)
+                            {
+                                float forwardRedirect = Mathf.Clamp((targetExitForwardMs - forwardVel) * 1.8f, 0f, absLatVel * 0.75f) * fricScale;
+                                rb.AddForce(fwd * forwardRedirect, ForceMode.Acceleration);
+                            }
+                        }
                     }
                 }
             }
-            else if (!isHandbrakeActive && horizSpeed > 2.0f)
+            else
             {
-                float moveSign = (forwardVel >= -0.5f) ? 1f : -1f;
-                Vector3 targetDir = fwd * moveSign;
-                float signedSlipDeg = Vector3.SignedAngle(horizVel, targetDir, Vector3.up);
+                handbrakeEntryMoveSign = 0f;
+                handbrakeSpinSign = 0f;
+                handbrakeEntryForward = Vector3.zero;
 
-                // Smooth, continuous turn-in yaw assist right from the start of steering input,
-                // building slightly more oversteer rotation in the latter half of sustained full-lock turns.
-                if (absSteer > 0.02f)
+                if (!isHandbrakeActive && horizSpeed > 2.0f)
                 {
-                    float speedAtten = 1.0f / (1.0f + 0.025f * Mathf.Max(0f, horizSpeed - 12.0f));
-                    float lateTurnOversteer = 1.0f + 0.45f * fullLockDriftFactor;
-                    float turnYawAccel = currentSteer * moveSign * steerYawAssist * fricScale * speedAtten * lateTurnOversteer;
-                    rb.AddTorque(Vector3.up * turnYawAccel, ForceMode.Acceleration);
-                }
+                    float moveSign = (forwardVel >= -0.5f) ? 1f : -1f;
+                    Vector3 targetDir = fwd * moveSign;
+                    float signedSlipDeg = Vector3.SignedAngle(horizVel, targetDir, Vector3.up);
 
-                // Self-aligning restoring torque if slip angle exceeds ~32 degrees so powerslides stay controllable
-                if (Mathf.Abs(signedSlipDeg) > 32f && moveSign > 0f)
-                {
-                    float excessSlipDeg = signedSlipDeg - Mathf.Sign(signedSlipDeg) * 32f;
-                    float restoreYawAccel = Mathf.Clamp(-excessSlipDeg * 0.065f, -2.8f, 2.8f);
-                    rb.AddTorque(Vector3.up * restoreYawAccel, ForceMode.Acceleration);
+                    // Smooth, continuous turn-in yaw assist right from the start of steering input,
+                    // building slightly more oversteer rotation in the latter half of sustained full-lock turns.
+                    if (absSteer > 0.02f)
+                    {
+                        float speedAtten = 1.0f / (1.0f + 0.025f * Mathf.Max(0f, horizSpeed - 12.0f));
+                        float lateTurnOversteer = 1.0f + 0.45f * fullLockDriftFactor;
+                        float turnYawAccel = currentSteer * moveSign * steerYawAssist * fricScale * speedAtten * lateTurnOversteer;
+                        rb.AddTorque(Vector3.up * turnYawAccel, ForceMode.Acceleration);
+                    }
+
+                    // Self-aligning restoring torque if slip angle exceeds ~32 degrees so powerslides stay controllable
+                    if (Mathf.Abs(signedSlipDeg) > 32f && moveSign > 0f)
+                    {
+                        float excessSlipDeg = signedSlipDeg - Mathf.Sign(signedSlipDeg) * 32f;
+                        float restoreYawAccel = Mathf.Clamp(-excessSlipDeg * 0.065f, -2.8f, 2.8f);
+                        rb.AddTorque(Vector3.up * restoreYawAccel, ForceMode.Acceleration);
+                    }
                 }
             }
         }
@@ -1252,6 +1357,16 @@ namespace MM2.Vehicle
             if (rearLeftCollider != null && rearLeftCollider.isGrounded) count++;
             if (rearRightCollider != null && rearRightCollider.isGrounded) count++;
             return count;
+        }
+
+        private void SetFrontWheelStiffness(float stiffness)
+        {
+            if (frontLeftCollider == null || frontRightCollider == null) return;
+
+            var curve = frontLeftCollider.sidewaysFriction;
+            curve.stiffness = stiffness * GetEffectiveWeatherFriction();
+            frontLeftCollider.sidewaysFriction = curve;
+            frontRightCollider.sidewaysFriction = curve;
         }
 
         private void SetRearWheelStiffness(float stiffness)

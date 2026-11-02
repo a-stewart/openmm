@@ -481,6 +481,10 @@ namespace MM2.AI
 
             MM2VehicleDamage dmg = oppGo.AddComponent<MM2VehicleDamage>();
             dmg.ConfigureForAgent(pkgName, rb.mass, isPlayer: false);
+            if (isCrashCourse && MM2RaceManager.Instance != null && MM2RaceManager.Instance.ActiveCrashEventType == 8)
+            {
+                dmg.IncomingDamageMultiplier = MM2PlayerManager.IsActiveProfilePro() ? 3.0f : 4.0f;
+            }
             opp.Damage = dmg;
 
             return opp;

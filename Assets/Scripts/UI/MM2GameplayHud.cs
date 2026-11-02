@@ -32,6 +32,8 @@ namespace MM2.UI
 
         [SerializeField] private RawImage minimapRawImage;
         [SerializeField] private RectTransform playerArrowRect;
+        [SerializeField] private RectTransform bottomLeftDashRect;
+        [SerializeField] private Text txtFpsCounter;
 
         // Race HUD elements (top-left counters, top-centre timer, 3D green arrow, and yellow countdown text)
         [SerializeField] private GameObject raceHudContainer;
@@ -74,6 +76,8 @@ namespace MM2.UI
         [SerializeField] private Camera minimapCamera;
         [SerializeField] private RenderTexture minimapRenderTexture;
         [SerializeField] private bool hasHudMapPkgGeometry;
+        [SerializeField] private Bounds minimapBounds;
+        [SerializeField] private bool hasMinimapBounds;
         [NonSerialized] private string loadedMinimapCity = "";
 
         private float displayedRpm01 = 0.12f;
@@ -81,6 +85,8 @@ namespace MM2.UI
         private int manualGear = 1; // -1 = R, 0 = N, 1..5 = forward gears
         private int lastAutoGear = 1;
         private int zoomPresetIndex = 0;
+        private float smoothedUnscaledDt = 1f / 60f;
+        private float fpsDisplayUpdateTimer = 0f;
         private static readonly float[] ZoomMultipliers = { 1.0f, 1.75f, 3.0f };
 
         private const float RevBarMaxWidth = 258f;
@@ -216,6 +222,8 @@ namespace MM2.UI
             blRect.pivot = new Vector2(0f, 0f);
             blRect.anchoredPosition = new Vector2(20f, 16f);
             blRect.sizeDelta = new Vector2(300f, 260f);
+            bottomLeftDashRect = blRect;
+            UpdateDashResolutionScale();
 
             // 1. Damage Meter (bottom bar: 129x12 native -> 258x24 at 2x scale)
             damageBarRawImage = CreateBottomLeftRawImage(
@@ -406,6 +414,43 @@ namespace MM2.UI
             );
 
             raceHudContainer.SetActive(false);
+
+            // Top-Right Optional FPS Counter (toggled in Options -> Show FPS Counter)
+            RectTransform canvasRect = canvasGo.GetComponent<RectTransform>();
+            txtFpsCounter = CreateHudText(
+                "Txt_FpsCounter",
+                canvasRect,
+                new Vector2(1f, 1f),
+                new Vector2(1f, 1f),
+                new Vector2(-18f, -12f),
+                new Vector2(240f, 44f),
+                28,
+                TextAnchor.UpperRight,
+                neonGreen,
+                "60 FPS"
+            );
+            MM2GameSession.EnsureSettingsLoaded();
+            txtFpsCounter.gameObject.SetActive(MM2GameSession.ShowFpsCounter);
+        }
+
+        /// <summary>
+        /// Scales the bottom-left dash HUD so that 720p (1280x720) is the baseline (1.0x),
+        /// and doubling the screen resolution (e.g. 1080p -> 4K) increases the physical width/height
+        /// by 50% (1.5x) rather than doubling (2.0x), while leaving the minimap scaling unchanged.
+        /// </summary>
+        private void UpdateDashResolutionScale()
+        {
+            if (bottomLeftDashRect == null) return;
+
+            float resRatioFrom720p = Mathf.Max(1.0f, Mathf.Min(Screen.width / 1280f, Screen.height / 720f));
+            // CanvasScaler scales by resRatioFrom720p relative to 720p.
+            // Applying localScale = resRatioFrom720p^(log2(1.5) - 1) yields physical size = resRatioFrom720p^log2(1.5),
+            // so any 2x resolution jump (such as 1080p -> 4K) increases physical dash size by exactly 1.5x (+50%).
+            const float HalfSlopeExp = -0.4150375f; // Mathf.Log(1.5f, 2f) - 1f
+            float dashLocalScale = Mathf.Pow(resRatioFrom720p, HalfSlopeExp);
+
+            bottomLeftDashRect.localScale = new Vector3(dashLocalScale, dashLocalScale, 1f);
+            bottomLeftDashRect.anchoredPosition = new Vector2(20f * dashLocalScale, 16f * dashLocalScale);
         }
 
         private Text CreateHudText(
@@ -820,7 +865,36 @@ namespace MM2.UI
                 Destroy(child.gameObject);
             }
 
+            hasMinimapBounds = false;
             hasHudMapPkgGeometry = TryBuildHudMapMesh(mapName, minimapWorldRoot.transform);
+            if (!hasHudMapPkgGeometry)
+            {
+                hasMinimapBounds = TryComputeFallbackCityBounds(out minimapBounds);
+            }
+        }
+
+        private static bool TryComputeFallbackCityBounds(out Bounds bounds)
+        {
+            bounds = default;
+            bool hasAny = false;
+            foreach (var mr in FindObjectsByType<MeshRenderer>(FindObjectsSortMode.None))
+            {
+                if (mr == null || !mr.gameObject.activeInHierarchy) continue;
+                Transform root = mr.transform.root;
+                if (root != null && root.name.StartsWith("MM2_City", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!hasAny)
+                    {
+                        bounds = mr.bounds;
+                        hasAny = true;
+                    }
+                    else
+                    {
+                        bounds.Encapsulate(mr.bounds);
+                    }
+                }
+            }
+            return hasAny && bounds.size.x > 40f && bounds.size.z > 40f;
         }
 
         private bool TryBuildHudMapMesh(string mapName, Transform parent)
@@ -952,6 +1026,8 @@ namespace MM2.UI
                 mesh.SetTriangles(submeshes[s], s);
             }
             mesh.RecalculateBounds();
+            minimapBounds = mesh.bounds;
+            hasMinimapBounds = minimapBounds.size.x > 10f && minimapBounds.size.z > 10f;
 
             MeshFilter mf = meshGo.AddComponent<MeshFilter>();
             mf.sharedMesh = mesh;
@@ -1022,11 +1098,12 @@ namespace MM2.UI
                 }
             }
 
-            if (hudCanvas != null && gearRawImage == null)
+            if (hudCanvas != null && (gearRawImage == null || bottomLeftDashRect == null))
             {
                 Transform bl = hudCanvas.transform.Find("BottomLeft_DashHUD");
                 if (bl != null)
                 {
+                    bottomLeftDashRect = bl.GetComponent<RectTransform>();
                     damageBarRawImage = bl.Find("DamageMeter_Fill")?.GetComponent<RawImage>();
                     damageLabelRawImage = bl.Find("DamageMeter_Label")?.GetComponent<RawImage>();
                     revCounterRawImage = bl.Find("RevCounter_Ticks")?.GetComponent<RawImage>();
@@ -1038,13 +1115,39 @@ namespace MM2.UI
                 }
             }
 
+            if (hudCanvas != null && txtFpsCounter == null)
+            {
+                Transform fpsTf = hudCanvas.transform.Find("Txt_FpsCounter");
+                if (fpsTf != null)
+                {
+                    txtFpsCounter = fpsTf.GetComponent<Text>();
+                }
+                else
+                {
+                    RectTransform canvasRect = hudCanvas.GetComponent<RectTransform>();
+                    txtFpsCounter = CreateHudText(
+                        "Txt_FpsCounter",
+                        canvasRect,
+                        new Vector2(1f, 1f),
+                        new Vector2(1f, 1f),
+                        new Vector2(-18f, -12f),
+                        new Vector2(240f, 44f),
+                        28,
+                        TextAnchor.UpperRight,
+                        new Color32(45, 255, 45, 255),
+                        "60 FPS"
+                    );
+                }
+            }
+
             if (minimapRawImage == null && hudCanvas != null)
             {
                 minimapRawImage = hudCanvas.transform.Find("BottomRight_Minimap/Minimap_RenderView")?.GetComponent<RawImage>();
             }
 
             if (minimapRawImage != null &&
-                (playerArrowRect == null || playerArrowRect.sizeDelta.x < 50f || checkpointMapIcons.Count == 0 || opponentMapIcons.Count == 0))
+                (playerArrowRect == null || playerArrowRect.sizeDelta.x < 50f || checkpointMapIcons.Count == 0 || opponentMapIcons.Count == 0 ||
+                 (checkpointMapIcons[0] != null && Mathf.Abs(checkpointMapIcons[0].sizeDelta.x - 36.4f) > 0.5f)))
             {
                 RebuildMinimapIcons(minimapRawImage.transform);
             }
@@ -1066,10 +1169,7 @@ namespace MM2.UI
             if (cachedTriangleSprite == null) cachedTriangleSprite = CreatePlayerTriangleSprite();
             if (cachedDiamondSprite == null) cachedDiamondSprite = CreateCheckpointDiamondSprite();
 
-            // 1. Pre-create Checkpoint Icons (green diamonds rendered underneath vehicles)
-            EnsureCheckpointMapIconCount(24, mapViewTf);
-
-            // 2. Pre-create Opponent / Quest Vehicle Icons (blue arrows for opponents, purple arrows for quest cars)
+            // 1. Pre-create Opponent / Quest Vehicle Icons (blue arrows for opponents, purple arrows for quest cars)
             for (int i = 0; i < 8; i++)
             {
                 GameObject oppIconGo = new GameObject($"Opponent_MapIcon_{i}");
@@ -1088,7 +1188,7 @@ namespace MM2.UI
                 opponentMapIcons.Add(oppImg);
             }
 
-            // 3. Pre-create Police Cruiser Icons (red arrows)
+            // 2. Pre-create Police Cruiser Icons (red arrows)
             for (int i = 0; i < 6; i++)
             {
                 GameObject copIconGo = new GameObject($"Police_MapIcon_{i}");
@@ -1107,7 +1207,10 @@ namespace MM2.UI
                 policeMapIcons.Add(copImg);
             }
 
-            // 4. Player Vehicle Arrow Icon (yellow arrow, 2.5x larger = 65x65, rendered on top at center)
+            // 3. Pre-create Checkpoint Icons (green diamonds, 1.3x size = 36.4x36.4, rendered ON TOP of opponents and police)
+            EnsureCheckpointMapIconCount(24, mapViewTf);
+
+            // 4. Player Vehicle Arrow Icon (yellow arrow, 2.5x larger = 65x65, rendered on top)
             GameObject arrowGo = new GameObject("Player_ArrowIcon");
             arrowGo.transform.SetParent(mapViewTf, false);
             playerArrowRect = arrowGo.AddComponent<RectTransform>();
@@ -1133,13 +1236,18 @@ namespace MM2.UI
                 int idx = checkpointMapIcons.Count;
                 GameObject cpIconGo = new GameObject($"Checkpoint_MapIcon_{idx}");
                 cpIconGo.transform.SetParent(mapViewTf, false);
-                cpIconGo.transform.SetSiblingIndex(idx);
+                // Place checkpoint icons above opponents and police, right below the player arrow
+                cpIconGo.transform.SetAsLastSibling();
+                if (playerArrowRect != null)
+                {
+                    playerArrowRect.SetAsLastSibling();
+                }
                 RectTransform cpRt = cpIconGo.AddComponent<RectTransform>();
                 cpRt.anchorMin = new Vector2(0.5f, 0.5f);
                 cpRt.anchorMax = new Vector2(0.5f, 0.5f);
                 cpRt.pivot = new Vector2(0.5f, 0.5f);
                 cpRt.anchoredPosition = Vector2.zero;
-                cpRt.sizeDelta = new Vector2(28f, 28f);
+                cpRt.sizeDelta = new Vector2(36.4f, 36.4f); // 1.3x of 28f
                 Image cpImg = cpIconGo.AddComponent<Image>();
                 cpImg.sprite = cachedDiamondSprite;
                 cpImg.color = new Color32(40, 255, 65, 255);
@@ -1152,6 +1260,8 @@ namespace MM2.UI
         private void Update()
         {
             EnsureHudInitialized();
+            UpdateDashResolutionScale();
+            UpdateFpsCounter();
 
             // Hide HUD & minimap camera while main menu is active
             bool menuOpen = FindFirstObjectByType<MM2MenuController>() != null;
@@ -1184,6 +1294,31 @@ namespace MM2.UI
             UpdateDamageMeterUv(currentDamage01);
             UpdateMinimapTransform(car);
             UpdateRaceHud(car);
+        }
+
+        private void UpdateFpsCounter()
+        {
+            if (txtFpsCounter == null) return;
+            MM2GameSession.EnsureSettingsLoaded();
+            bool showFps = MM2GameSession.ShowFpsCounter;
+            if (txtFpsCounter.gameObject.activeSelf != showFps)
+            {
+                txtFpsCounter.gameObject.SetActive(showFps);
+            }
+            if (!showFps) return;
+
+            float dt = Time.unscaledDeltaTime;
+            if (dt > 0.0001f && dt < 1.0f)
+            {
+                smoothedUnscaledDt += (dt - smoothedUnscaledDt) * 0.1f;
+            }
+            fpsDisplayUpdateTimer -= dt;
+            if (fpsDisplayUpdateTimer <= 0f)
+            {
+                fpsDisplayUpdateTimer = 0.25f;
+                int fps = Mathf.Clamp(Mathf.RoundToInt(1.0f / Mathf.Max(0.0005f, smoothedUnscaledDt)), 1, 9999);
+                txtFpsCounter.text = $"{fps} FPS";
+            }
         }
 
         private void UpdateRaceHud(ArcadeVehicleController car)
@@ -1536,19 +1671,70 @@ namespace MM2.UI
             Vector3 carPos = car.transform.position;
             Vector3 carFwd = car.transform.forward;
 
+            Rect viewRect = minimapRawImage != null ? minimapRawImage.rectTransform.rect : new Rect(0f, 0f, 400f, 268f);
+            float halfUiW = Mathf.Max(1f, viewRect.width * 0.5f);
+            float halfUiH = Mathf.Max(1f, viewRect.height * 0.5f);
+            float aspect = halfUiW / halfUiH;
+            minimapCamera.aspect = aspect;
+
+            if (!hasHudMapPkgGeometry && !hasMinimapBounds)
+            {
+                hasMinimapBounds = TryComputeFallbackCityBounds(out minimapBounds);
+            }
+
             // Dynamic speed zoom (matching tune/sf.mmHudMap ZoomInDist/ZoomOutDist behavior)
             float speedT = Mathf.Clamp01(car.CurrentSpeedMph / 110f);
             float baseOrthoSize = Mathf.Lerp(225f, 330f, speedT) * ZoomMultipliers[zoomPresetIndex];
+            if (hasMinimapBounds)
+            {
+                float maxOrthoH = minimapBounds.extents.z;
+                float maxOrthoW = minimapBounds.extents.x / Mathf.Max(0.1f, aspect);
+                float maxAllowedOrtho = Mathf.Min(maxOrthoH, maxOrthoW);
+                if (maxAllowedOrtho > 25f)
+                {
+                    baseOrthoSize = Mathf.Min(baseOrthoSize, maxAllowedOrtho);
+                }
+            }
             minimapCamera.orthographicSize = Mathf.Lerp(minimapCamera.orthographicSize, baseOrthoSize, Time.deltaTime * 6f);
+
+            float orthoHalfH = Mathf.Max(1f, minimapCamera.orthographicSize);
+            float orthoHalfW = orthoHalfH * aspect;
+
+            Vector3 focusWorldPos = carPos;
+            Vector2 playerUiOffset = Vector2.zero;
 
             if (hasHudMapPkgGeometry)
             {
                 // Unity world position is (-vx_age, vy_age, vz_age).
                 // Our minimap mesh is built at (vx_age, MinimapWorldY, -vz_age) = (-carPos.x, MinimapWorldY, -carPos.z).
-                minimapCamera.transform.position = new Vector3(-carPos.x, MinimapWorldY + 60f, -carPos.z);
+                float rawCamX = -carPos.x;
+                float rawCamZ = -carPos.z;
+                float camX = rawCamX;
+                float camZ = rawCamZ;
+
+                if (hasMinimapBounds)
+                {
+                    float minCamX = minimapBounds.min.x + orthoHalfW;
+                    float maxCamX = minimapBounds.max.x - orthoHalfW;
+                    camX = (minCamX <= maxCamX) ? Mathf.Clamp(rawCamX, minCamX, maxCamX) : minimapBounds.center.x;
+
+                    float minCamZ = minimapBounds.min.z + orthoHalfH;
+                    float maxCamZ = minimapBounds.max.z - orthoHalfH;
+                    camZ = (minCamZ <= maxCamZ) ? Mathf.Clamp(rawCamZ, minCamZ, maxCamZ) : minimapBounds.center.z;
+                }
+
+                minimapCamera.transform.position = new Vector3(camX, MinimapWorldY + 60f, camZ);
                 minimapCamera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
                 minimapCamera.nearClipPlane = 5f;
                 minimapCamera.farClipPlane = 200f;
+
+                focusWorldPos = new Vector3(-camX, carPos.y, -camZ);
+                float playerNx = (rawCamX - camX) / orthoHalfW;
+                float playerNy = (rawCamZ - camZ) / orthoHalfH;
+                playerUiOffset = new Vector2(
+                    Mathf.Clamp(playerNx * halfUiW, -halfUiW * 0.94f, halfUiW * 0.94f),
+                    Mathf.Clamp(playerNy * halfUiH, -halfUiH * 0.94f, halfUiH * 0.94f)
+                );
 
                 if (playerArrowRect != null)
                 {
@@ -1556,25 +1742,51 @@ namespace MM2.UI
                     float mapDx = -carFwd.x;
                     float mapDy = -carFwd.z;
                     float angleDeg = Mathf.Atan2(-mapDx, mapDy) * Mathf.Rad2Deg;
+                    playerArrowRect.anchoredPosition = playerUiOffset;
                     playerArrowRect.localEulerAngles = new Vector3(0f, 0f, angleDeg);
                 }
             }
             else
             {
                 // Fallback for custom cities without a hudmap_*.pkg: top-down orthographic view of the 3D city
-                minimapCamera.transform.position = new Vector3(carPos.x, carPos.y + 260f, carPos.z);
+                float rawCamX = carPos.x;
+                float rawCamZ = carPos.z;
+                float camX = rawCamX;
+                float camZ = rawCamZ;
+
+                if (hasMinimapBounds)
+                {
+                    float minCamX = minimapBounds.min.x + orthoHalfW;
+                    float maxCamX = minimapBounds.max.x - orthoHalfW;
+                    camX = (minCamX <= maxCamX) ? Mathf.Clamp(rawCamX, minCamX, maxCamX) : minimapBounds.center.x;
+
+                    float minCamZ = minimapBounds.min.z + orthoHalfH;
+                    float maxCamZ = minimapBounds.max.z - orthoHalfH;
+                    camZ = (minCamZ <= maxCamZ) ? Mathf.Clamp(rawCamZ, minCamZ, maxCamZ) : minimapBounds.center.z;
+                }
+
+                minimapCamera.transform.position = new Vector3(camX, carPos.y + 260f, camZ);
                 minimapCamera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
                 minimapCamera.nearClipPlane = 10f;
                 minimapCamera.farClipPlane = 600f;
 
+                focusWorldPos = new Vector3(camX, carPos.y, camZ);
+                float playerNx = (rawCamX - camX) / orthoHalfW;
+                float playerNy = (rawCamZ - camZ) / orthoHalfH;
+                playerUiOffset = new Vector2(
+                    Mathf.Clamp(playerNx * halfUiW, -halfUiW * 0.94f, halfUiW * 0.94f),
+                    Mathf.Clamp(playerNy * halfUiH, -halfUiH * 0.94f, halfUiH * 0.94f)
+                );
+
                 if (playerArrowRect != null)
                 {
                     float angleDeg = Mathf.Atan2(-carFwd.x, carFwd.z) * Mathf.Rad2Deg;
+                    playerArrowRect.anchoredPosition = playerUiOffset;
                     playerArrowRect.localEulerAngles = new Vector3(0f, 0f, angleDeg);
                 }
             }
 
-            UpdateMinimapAiIcons(carPos);
+            UpdateMinimapAiIcons(focusWorldPos);
         }
 
         private void UpdateMinimapAiIcons(Vector3 playerPos)

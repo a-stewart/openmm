@@ -35,6 +35,7 @@ namespace MM2.Vehicle
 
         [Header("Runtime Damage State")]
         public float CurrentDamage;
+        public float IncomingDamageMultiplier = 1.0f;
         public bool IsHeavilyDamaged;
         public bool IsTotaled;
         public int ActiveDamageZoneMask;
@@ -324,6 +325,13 @@ namespace MM2.Vehicle
             var otherVehicleDamage = otherCol.GetComponentInParent<MM2VehicleDamage>();
             Rigidbody otherRb = collision.rigidbody;
 
+            // When the player vehicle collides with a kinematic AI vehicle, let the player's dynamic Rigidbody
+            // compute the impact and report it via NotifyReciprocalImpact so kinematic callback ordering never drops speed.
+            if (!IsPlayerVehicle && otherVehicleDamage != null && otherVehicleDamage.IsPlayerVehicle)
+            {
+                return;
+            }
+
             // Key vehicles by their root transform and static city colliders by collider instance ID
             // so touching a curb on one city chunk never locks out hitting a building on another (or vice versa)
             int targetId = (trafficAgent != null || otherVehicleDamage != null || otherRb != null)
@@ -462,11 +470,18 @@ namespace MM2.Vehicle
             // Ensure the other vehicle (if it is an AI Opponent or Cop) also records its share of the collision!
             if (otherVehicleDamage != null && otherVehicleDamage != this)
             {
+                float reciprocalSpeedMps = effectiveSpeedMps;
+                if (IsPlayerVehicle && !otherVehicleDamage.IsPlayerVehicle)
+                {
+                    // When ramming a fleeing AI vehicle moving in the same direction, include high-speed chase energy
+                    reciprocalSpeedMps = Mathf.Max(effectiveSpeedMps, preVel.magnitude * 0.62f);
+                }
+
                 otherVehicleDamage.NotifyReciprocalImpact(
                     transform.root,
                     bestHitPoint,
                     -bestHitNormal,
-                    effectiveSpeedMps,
+                    reciprocalSpeedMps,
                     SelfMassKg
                 );
             }
@@ -482,6 +497,15 @@ namespace MM2.Vehicle
             if (_rb != null && !_rb.isKinematic)
             {
                 return _rb.linearVelocity;
+            }
+            var opp = GetComponent<MM2OpponentAgent>();
+            if (opp != null)
+            {
+                Vector3 oppVel = transform.forward * opp.CurrentSpeed + opp.ImpactPerturbationVelocity;
+                if (oppVel.sqrMagnitude > estimatedKinematicVel.sqrMagnitude)
+                {
+                    return oppVel;
+                }
             }
             return estimatedKinematicVel;
         }
@@ -578,6 +602,18 @@ namespace MM2.Vehicle
             float damageDelta = Mathf.Max(0f, rawImpulse - ImpactThreshold * subtractImpulseFactor);
             // Cap maximum single-impact damage to 16% of MaxDamage so one huge crash can't nearly destroy the car
             damageDelta = Mathf.Min(damageDelta, MaxDamage * 0.16f);
+
+            // In Crash Course "Destroy that car!" challenges (EventType == 8), opponents receive damage
+            // 4x as fast as normal in Amateur mode and 3x as fast in Pro mode.
+            float damageMultiplier = IncomingDamageMultiplier;
+            if (!IsPlayerVehicle &&
+                MM2RaceManager.Instance != null &&
+                MM2RaceManager.Instance.ActiveCrashEventType == 8)
+            {
+                float crashDestroyMult = MM2PlayerManager.IsActiveProfilePro() ? 3.0f : 4.0f;
+                damageMultiplier = Mathf.Max(damageMultiplier, crashDestroyMult);
+            }
+            damageDelta *= damageMultiplier;
             if (damageDelta <= 1f) return false;
 
             if (!isProp)
