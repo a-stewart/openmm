@@ -153,7 +153,33 @@ namespace MM2.Archive
                     tex.wrapMode = TextureWrapMode.Repeat;
                     tex.filterMode = FilterMode.Bilinear;
                     tex.anisoLevel = 4;
-                    info = new DecodedTextureInfo { Texture = tex };
+
+                    bool hasAlpha = false;
+                    bool hasSemiTrans = false;
+                    if (vPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Color32[] px = tex.GetPixels32();
+                        for (int i = 0; i < px.Length; i++)
+                        {
+                            byte a = px[i].a;
+                            if (a < 250)
+                            {
+                                hasAlpha = true;
+                                if (a > 15 && a < 240)
+                                {
+                                    hasSemiTrans = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    info = new DecodedTextureInfo
+                    {
+                        Texture = tex,
+                        HasAlpha = hasAlpha,
+                        HasSemiTransparency = hasSemiTrans
+                    };
                 }
                 else
                 {

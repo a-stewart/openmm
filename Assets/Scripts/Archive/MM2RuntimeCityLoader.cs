@@ -291,7 +291,7 @@ namespace MM2.Archive
                 {
                     if (IsPointInTriangleXZ(worldPos.x, worldPos.z, wt.A, wt.B, wt.C))
                     {
-                        if (!HasSolidGroundBelow(worldPos, ignoreCollider, triY + 0.25f, 3.2f) &&
+                        if (!HasSolidGroundBelow(worldPos, ignoreCollider, triY - 0.05f, 3.2f) &&
                             !HasSolidCeilingAbove(worldPos, ignoreCollider, 14f))
                         {
                             waterSurfaceY = triY;
@@ -371,11 +371,12 @@ namespace MM2.Archive
                 string locName = fields.TryGetValue("LocalizedName", out string ln) && !string.IsNullOrEmpty(ln) ? ln : mapName;
                 string raceDir = fields.TryGetValue("RaceDir", out string rd) && !string.IsNullOrEmpty(rd) ? rd : mapName;
 
-                // Ensure the corresponding MM2 .psdl or MM1 .ptl / city .bms directory exists in the archives
+                // Ensure the corresponding MM2 .psdl, MM1 .ptl / city .bms directory, or OSM2World .obj / .osm exists in the archives
                 bool hasMm2City = MM2ArchiveSystem.FileExists($"city/{mapName}.psdl");
                 bool hasMm1City = MM2ArchiveSystem.FileExists($"city/{mapName}.ptl") ||
                                   MM2ArchiveSystem.HasBmsDirectory($"{mapName}city");
-                if (!hasMm2City && !hasMm1City)
+                bool hasOsmCity = MM2OsmCitySystem.HasOsmOrObjCity(mapName);
+                if (!hasMm2City && !hasMm1City && !hasOsmCity)
                 {
                     continue;
                 }
@@ -415,6 +416,41 @@ namespace MM2.Archive
                 CitiesByName[spec.DisplayName] = spec;
                 CitiesByName[spec.MapName] = spec;
                 CityList.Add(spec);
+            }
+
+            // Also auto-discover any standalone city/*.obj or city/*.osm files that do not yet have a tune/*.cinfo file
+            List<string> standaloneOsmCities = MM2OsmCitySystem.DiscoverStandaloneOsmCityMapNames();
+            foreach (string osmMap in standaloneOsmCities)
+            {
+                if (CitiesByName.ContainsKey(osmMap)) continue;
+                if (MM2ArchiveSystem.FileExists($"city/{osmMap}.psdl") ||
+                    MM2ArchiveSystem.FileExists($"city/{osmMap}.ptl") ||
+                    MM2ArchiveSystem.HasBmsDirectory($"{osmMap}city"))
+                {
+                    continue;
+                }
+
+                string prettyName = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(osmMap.Replace('_', ' '));
+                var emptyFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var osmSpec = new CitySpec
+                {
+                    DisplayName = prettyName,
+                    MapName = osmMap,
+                    RaceDir = osmMap,
+                    MustPlace = 3,
+                    UnlockGroup = 3,
+                    BlitzNames = ResolveRaceNameList(osmMap, osmMap, "blitz", null, null),
+                    CircuitNames = ResolveRaceNameList(osmMap, osmMap, "circuit", null, null),
+                    CheckpointNames = ResolveRaceNameList(osmMap, osmMap, "race", null, null),
+                    CustomMapPreviewSprite = TryLoadCityMapSprite(osmMap)
+                };
+
+                PopulateCrashCourseData(osmSpec, emptyFields);
+                PopulateCityRewardsData(osmSpec, loadedRewardPaths);
+
+                CitiesByName[osmSpec.DisplayName] = osmSpec;
+                CitiesByName[osmSpec.MapName] = osmSpec;
+                CityList.Add(osmSpec);
             }
 
             // Also scan any standalone race/*/*_rewards.csv files from mod archives
@@ -1439,7 +1475,7 @@ namespace MM2.Archive
             {
                 csv = MM2ArchiveSystem.ReadFileText($"race/{spec.MapName}/{stem}.csv");
             }
-            return ParseWaypointsCsv(csv);
+            return ParseWaypointsCsv(csv, spec.MapName);
         }
 
         public static List<MM2RaceWaypoint> LoadRaceWaypoints(string locationName, string raceType, int raceIndex)
@@ -1463,13 +1499,15 @@ namespace MM2.Archive
             {
                 csv = MM2ArchiveSystem.ReadFileText($"race/{spec.MapName}/{prefix}{idx}waypoints.csv");
             }
-            return ParseWaypointsCsv(csv);
+            return ParseWaypointsCsv(csv, spec.MapName);
         }
 
-        private static List<MM2RaceWaypoint> ParseWaypointsCsv(string csv)
+        private static List<MM2RaceWaypoint> ParseWaypointsCsv(string csv, string mapName = null)
         {
             var list = new List<MM2RaceWaypoint>();
             if (string.IsNullOrEmpty(csv)) return list;
+
+            bool isOsmCity = !string.IsNullOrEmpty(mapName) && MM2OsmCitySystem.HasOsmOrObjCity(mapName);
 
             string[] lines = csv.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 1; i < lines.Length; i++)
@@ -1495,7 +1533,9 @@ namespace MM2.Archive
 
                 // In AGE space: forward = (sin(ang), 0, -cos(ang)).
                 // In Unity left-handed space (-x, y, z): forward = (-sin(ang), 0, -cos(ang)) = Quaternion.Euler(0, ang + 180, 0).
-                Vector3 posUnity = new Vector3(-ax, ay, az);
+                Vector3 posUnity = isOsmCity
+                    ? MM2OsmCitySystem.ConvertAuthoringCoordsToUnity(mapName, ax, ay, az, snapToRoadElevation: true)
+                    : new Vector3(-ax, ay, az);
                 Quaternion rotUnity = Quaternion.Euler(0f, ang + 180f, 0f);
 
                 list.Add(new MM2RaceWaypoint
@@ -1639,7 +1679,7 @@ namespace MM2.Archive
                 if (fn.StartsWith(prefixPrimary, StringComparison.OrdinalIgnoreCase) ||
                     fn.StartsWith(prefixAlt, StringComparison.OrdinalIgnoreCase))
                 {
-                    MM2CruiseSpawnLocation parsed = ParseCruiseSpawnFile(vPath);
+                    MM2CruiseSpawnLocation parsed = ParseCruiseSpawnFile(vPath, mapName);
                     if (parsed != null)
                     {
                         discovered.Add(parsed);
@@ -1647,7 +1687,17 @@ namespace MM2.Archive
                 }
             }
 
-            // Only expose the Cruise Starting Point selector when the city actually has spawn_*.txt files;
+            // For OSM2World / .osm cities, also include auto-discovered OSM landmarks and streets if no spawn_*.txt files exist
+            if (discovered.Count == 0 && MM2OsmCitySystem.HasOsmOrObjCity(mapName))
+            {
+                IReadOnlyList<MM2CruiseSpawnLocation> autoSpawns = MM2OsmCitySystem.GetAutoCruiseSpawns(mapName);
+                if (autoSpawns != null && autoSpawns.Count > 0)
+                {
+                    discovered.AddRange(autoSpawns);
+                }
+            }
+
+            // Only expose the Cruise Starting Point selector when the city actually has spawn_*.txt or OSM landmark spawns;
             // otherwise return an empty list so the UI and Cruise spawner fall back to classic behavior.
             var list = new List<MM2CruiseSpawnLocation>();
             if (discovered.Count > 0)
@@ -1681,7 +1731,7 @@ namespace MM2.Archive
             return names;
         }
 
-        private static MM2CruiseSpawnLocation ParseCruiseSpawnFile(string virtualPath)
+        private static MM2CruiseSpawnLocation ParseCruiseSpawnFile(string virtualPath, string mapName = null)
         {
             string content = MM2ArchiveSystem.ReadFileText(virtualPath);
             if (string.IsNullOrEmpty(content)) return null;
@@ -1692,26 +1742,55 @@ namespace MM2.Archive
             string displayName = lines[0].Trim();
             if (string.IsNullOrEmpty(displayName)) return null;
 
+            bool isLatLonLine = false;
             int coordsIdx = content.IndexOf("Coordinates:", StringComparison.OrdinalIgnoreCase);
+            int keyLen = "Coordinates:".Length;
+            if (coordsIdx < 0)
+            {
+                coordsIdx = content.IndexOf("LatLon:", StringComparison.OrdinalIgnoreCase);
+                keyLen = "LatLon:".Length;
+                isLatLonLine = coordsIdx >= 0;
+            }
             if (coordsIdx < 0) return null;
 
-            string coordsPart = content.Substring(coordsIdx + "Coordinates:".Length);
+            string coordsPart = content.Substring(coordsIdx + keyLen);
             int nl = coordsPart.IndexOfAny(new[] { '\r', '\n' });
             if (nl >= 0) coordsPart = coordsPart.Substring(0, nl);
 
             string[] parts = coordsPart.Replace(" ", "").Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 4) return null;
 
-            if (!float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float ax) ||
-                !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float ay) ||
-                !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float az) ||
-                !float.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out float angle))
+            float ax, ay, az, angle;
+            if (isLatLonLine && parts.Length >= 3)
+            {
+                if (!float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out ax) ||
+                    !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out az) ||
+                    !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out angle))
+                {
+                    return null;
+                }
+                ay = 0f;
+            }
+            else if (parts.Length >= 4)
+            {
+                if (!float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out ax) ||
+                    !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out ay) ||
+                    !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out az) ||
+                    !float.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out angle))
+                {
+                    return null;
+                }
+            }
+            else
             {
                 return null;
             }
 
             string fileName = System.IO.Path.GetFileName(virtualPath);
             string photoStem = System.IO.Path.GetFileNameWithoutExtension(virtualPath);
+
+            Vector3 posUnity = (!string.IsNullOrEmpty(mapName) && MM2OsmCitySystem.HasOsmOrObjCity(mapName))
+                ? (MM2OsmCitySystem.ConvertAuthoringCoordsToUnity(mapName, ax, ay, az, snapToRoadElevation: true) + Vector3.up * 1.5f)
+                : new Vector3(-ax, ay + 1.5f, az);
 
             // In MM2 CarSim.ResetRotation = math.rad(angle), RotateY(angle) rotates AGE forward (0,0,-1)
             // to (-sin(angle), 0, -cos(angle)) in AGE -> (+sin(angle), 0, -cos(angle)) in Unity = Euler(0, 180 - angle, 0).
@@ -1721,7 +1800,7 @@ namespace MM2.Archive
                 FileName = fileName,
                 VirtualPath = virtualPath,
                 PhotoStem = photoStem,
-                PositionUnity = new Vector3(-ax, ay + 1.5f, az),
+                PositionUnity = posUnity,
                 RotationUnity = Quaternion.Euler(0f, 180f - angle, 0f),
                 AngleDegrees = angle,
                 IsRandom = false
@@ -1782,7 +1861,9 @@ namespace MM2.Archive
                 $"jpg/mapr_{mapName}.jpg",
                 string.Equals(mapName, "london", StringComparison.OrdinalIgnoreCase) ? "jpg/mapr_lon.jpg" : null,
                 $"jpg/{mapName}_mapblitz0.jpg",
-                $"jpg/{mapName}_maprace0.jpg"
+                $"jpg/{mapName}_maprace0.jpg",
+                $"texture/hudmap_{mapName}.png",
+                $"texture/hudmap_{mapName}.jpg"
             };
 
             foreach (string cand in candidates)
@@ -1804,6 +1885,16 @@ namespace MM2.Archive
                     UnityEngine.Object.Destroy(tex);
                 }
             }
+
+            if (MM2OsmCitySystem.HasOsmOrObjCity(mapName))
+            {
+                Sprite osmMapSprite = MM2OsmCitySystem.GetOrCreateOsmMapPreviewSprite(mapName);
+                if (osmMapSprite != null)
+                {
+                    return osmMapSprite;
+                }
+            }
+
             return GetOrCreatePlaceholderMapSprite(mapName);
         }
 
@@ -2215,6 +2306,7 @@ namespace MM2.Archive
                 if (string.IsNullOrEmpty(csv)) continue;
 
                 var pts = new List<(Vector3 posUnity, float angle)>();
+                bool isOsmCity = MM2OsmCitySystem.HasOsmOrObjCity(spec.MapName);
                 string[] lines = csv.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
                 for (int i = 1; i < lines.Length; i++)
                 {
@@ -2225,7 +2317,10 @@ namespace MM2.Archive
                         float.TryParse(cols[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float az) &&
                         float.TryParse(cols[3].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float ang))
                     {
-                        pts.Add((new Vector3(-ax, ay + 0.6f, az), ang));
+                        Vector3 pU = isOsmCity
+                            ? (MM2OsmCitySystem.ConvertAuthoringCoordsToUnity(spec.MapName, ax, ay, az, snapToRoadElevation: true) + Vector3.up * 0.6f)
+                            : new Vector3(-ax, ay + 0.6f, az);
+                        pts.Add((pU, ang));
                         if (pts.Count >= 2) break;
                     }
                 }
@@ -2255,6 +2350,37 @@ namespace MM2.Archive
                 }
             }
 
+            // Fallback: check auto-discovered or authored Cruise spawn locations, then AI intersection graph
+            IReadOnlyList<MM2CruiseSpawnLocation> spawns = GetCruiseSpawnLocations(spec.DisplayName ?? spec.MapName);
+            if (spawns != null)
+            {
+                for (int i = 0; i < spawns.Count; i++)
+                {
+                    if (!spawns[i].IsRandom)
+                    {
+                        spawnPos = spawns[i].PositionUnity;
+                        spawnRot = spawns[i].RotationUnity;
+                        if (Physics.Raycast(spawnPos + Vector3.up * 15f, Vector3.down, out RaycastHit hit, 50f, ~0, QueryTriggerInteraction.Ignore) &&
+                            hit.normal.y >= 0.35f)
+                        {
+                            spawnPos.y = hit.point.y + 0.55f;
+                        }
+                        return;
+                    }
+                }
+            }
+
+            MM2.AI.MM2AiMapData fallbackAi = MM2.AI.MM2AiMapData.Load(spec.MapName, spec.RaceDir, null);
+            if (fallbackAi != null && fallbackAi.TryGetRandomSpawnIntersectionPose(out spawnPos, out spawnRot))
+            {
+                if (Physics.Raycast(spawnPos + Vector3.up * 15f, Vector3.down, out RaycastHit hit, 50f, ~0, QueryTriggerInteraction.Ignore) &&
+                    hit.normal.y >= 0.35f)
+                {
+                    spawnPos.y = hit.point.y + 0.55f;
+                }
+                return;
+            }
+
             spawnPos = new Vector3(0f, 5f, 0f);
             spawnRot = Quaternion.identity;
         }
@@ -2282,13 +2408,29 @@ namespace MM2.Archive
                 return;
             }
 
-            // 1. Specific Cruise starting point selected from city/spawn_<city>_*.txt
+            // 1. Specific Cruise starting point selected from city/spawn_<city>_*.txt or auto-discovered OSM landmarks
             if (!string.IsNullOrEmpty(chosenSpotFileName))
             {
-                string vPath = chosenSpotFileName.StartsWith("city/", StringComparison.OrdinalIgnoreCase)
-                    ? chosenSpotFileName
-                    : $"city/{chosenSpotFileName}";
-                MM2CruiseSpawnLocation loc = ParseCruiseSpawnFile(vPath);
+                MM2CruiseSpawnLocation loc = null;
+                for (int i = 0; i < citySpawns.Count; i++)
+                {
+                    if (!citySpawns[i].IsRandom &&
+                        (string.Equals(citySpawns[i].FileName, chosenSpotFileName, StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(citySpawns[i].DisplayName, chosenSpotFileName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        loc = citySpawns[i];
+                        break;
+                    }
+                }
+
+                if (loc == null)
+                {
+                    string vPath = chosenSpotFileName.StartsWith("city/", StringComparison.OrdinalIgnoreCase)
+                        ? chosenSpotFileName
+                        : $"city/{chosenSpotFileName}";
+                    loc = ParseCruiseSpawnFile(vPath, spec.MapName);
+                }
+
                 if (loc != null)
                 {
                     spawnPos = loc.PositionUnity;
@@ -2379,6 +2521,12 @@ namespace MM2.Archive
                     MM2ArchiveSystem.FileExists($"city/{spec.MapName}.fcd"))
                 {
                     BuildRuntimeMm1CityFromArchives(spec);
+                    return;
+                }
+
+                if (MM2OsmCitySystem.HasOsmOrObjCity(spec.MapName))
+                {
+                    BuildRuntimeOsmCityFromArchives(spec);
                     return;
                 }
 
@@ -2886,6 +3034,143 @@ namespace MM2.Archive
 
             sw.Stop();
             Debug.Log($"[MM2RuntimeCityLoader] Built runtime city '{spec.DisplayName}' ({spec.MapName}) from .ar archives in {sw.ElapsedMilliseconds} ms.");
+        }
+
+        private static void BuildRuntimeOsmCityFromArchives(CitySpec spec)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            GameObject cityRoot = new GameObject("MM2_Runtime_City");
+            cityRoot.transform.position = Vector3.zero;
+            cityRoot.transform.rotation = Quaternion.identity;
+
+            CityWaterTriangles.Clear();
+            hasRecordedWaterLevel = false;
+            hasExplicitWaterFileLevel = false;
+            CityWaterLevel = -3.0f;
+
+            string waterFileText = MM2ArchiveSystem.ReadFileText($"city/{spec.MapName}.water");
+            if (!string.IsNullOrEmpty(waterFileText))
+            {
+                string[] waterTokens = waterFileText.Split(new[] { '\r', '\n', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (waterTokens.Length > 0 &&
+                    float.TryParse(waterTokens[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedWaterY))
+                {
+                    CityWaterLevel = parsedWaterY;
+                    hasExplicitWaterFileLevel = true;
+                }
+            }
+
+            GameObject bangersRoot = new GameObject($"{spec.MapName}_Bangers");
+            bangersRoot.transform.SetParent(cityRoot.transform, false);
+
+            bool built = MM2OsmCitySystem.BuildRuntimeOsmCity(
+                spec,
+                cityRoot.transform,
+                bangersRoot.transform,
+                RecordWaterTriangles,
+                out float minX,
+                out float maxX,
+                out float minZ,
+                out float maxZ,
+                out float minVertY);
+
+            if (!built)
+            {
+                Debug.LogError($"[MM2RuntimeCityLoader] Failed to build OSM2World / .osm city for '{spec.MapName}'!");
+                UnityEngine.Object.DestroyImmediate(cityRoot);
+                return;
+            }
+
+            if (!hasExplicitWaterFileLevel)
+            {
+                // Keep outer horizon water below sunken OSM roads/tunnels while preserving recorded river/lake WaterTriangles
+                CityWaterLevel = Mathf.Min(CityWaterLevel, minVertY - 5.0f);
+            }
+
+            // Also support optional .inst, props.pathset, and _bridge.pathset files from a companion .ar archive
+            var propChunk = new RuntimeDistrictChunk();
+            RuntimeDistrictChunk GetPropChunk(float ux, float uz) => propChunk;
+
+            ExpandInstFile($"city/{spec.MapName}.inst", GetPropChunk, bangersRoot.transform);
+            ExpandInstFile($"city/{spec.MapName}_ai.inst", GetPropChunk, bangersRoot.transform);
+            ExpandPropsPathset($"city/{spec.MapName}/props.pathset", GetPropChunk, bangersRoot.transform);
+
+            Shader urpLit = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            var cityMatCache = new Dictionary<string, Material>(StringComparer.OrdinalIgnoreCase);
+            Material GetCityMaterial(string tName) => GetOrCreateCityMaterial(tName, urpLit, cityMatCache);
+
+            if (propChunk.VisualByTexture.Count > 0 || propChunk.ColTriangles.Count > 0)
+            {
+                GameObject propStaticGo = new GameObject($"{spec.MapName}_StaticProps");
+                propStaticGo.transform.SetParent(cityRoot.transform, false);
+
+                if (propChunk.VisualByTexture.Count > 0)
+                {
+                    var allPos = new List<Vector3>();
+                    var allNorm = new List<Vector3>();
+                    var allUV = new List<Vector2>();
+                    var subTris = new List<int[]>();
+                    var mats = new List<Material>();
+
+                    foreach (var kvp in propChunk.VisualByTexture)
+                    {
+                        RuntimeSubmeshBucket b = kvp.Value;
+                        if (b.Triangles.Count == 0) continue;
+
+                        int baseV = allPos.Count;
+                        allPos.AddRange(b.Positions);
+                        allNorm.AddRange(b.Normals);
+                        allUV.AddRange(b.UVs);
+
+                        int[] indices = new int[b.Triangles.Count];
+                        for (int i = 0; i < indices.Length; i++) indices[i] = baseV + b.Triangles[i];
+                        subTris.Add(indices);
+                        mats.Add(GetCityMaterial(kvp.Key));
+                    }
+
+                    Mesh visMesh = new Mesh { name = propStaticGo.name, indexFormat = IndexFormat.UInt32 };
+                    visMesh.SetVertices(allPos);
+                    visMesh.SetNormals(allNorm);
+                    visMesh.SetUVs(0, allUV);
+                    visMesh.subMeshCount = subTris.Count;
+                    for (int s = 0; s < subTris.Count; s++) visMesh.SetTriangles(subTris[s], s, false);
+                    visMesh.RecalculateBounds();
+
+                    propStaticGo.AddComponent<MeshFilter>().sharedMesh = visMesh;
+                    propStaticGo.AddComponent<MeshRenderer>().sharedMaterials = mats.ToArray();
+                }
+
+                if (propChunk.ColPositions.Count > 0 && propChunk.ColTriangles.Count > 0)
+                {
+                    Mesh colMesh = new Mesh { name = $"{propStaticGo.name}_Col", indexFormat = IndexFormat.UInt32 };
+                    colMesh.SetVertices(propChunk.ColPositions);
+                    colMesh.SetTriangles(propChunk.ColTriangles, 0, true);
+                    propStaticGo.AddComponent<MeshCollider>().sharedMesh = colMesh;
+                }
+            }
+
+            GameObject bridgesRoot = new GameObject($"{spec.MapName}_Drawbridges");
+            bridgesRoot.transform.SetParent(cityRoot.transform, false);
+            ExpandBridgePathset($"race/{spec.RaceDir}/{spec.MapName}_bridge.pathset", bridgesRoot.transform, GetCityMaterial, false);
+
+            // Refresh custom map preview sprite now that OSM metadata is parsed
+            if (spec.CustomMapPreviewSprite == null ||
+                spec.CustomMapPreviewSprite.texture == null ||
+                spec.CustomMapPreviewSprite.texture.name.StartsWith("Placeholder", StringComparison.OrdinalIgnoreCase))
+            {
+                Sprite osmPreview = MM2OsmCitySystem.GetOrCreateOsmMapPreviewSprite(spec.MapName);
+                if (osmPreview != null)
+                {
+                    spec.CustomMapPreviewSprite = osmPreview;
+                }
+            }
+
+            BuildRuntimeSkyDome(cityRoot.transform, spec.MapName);
+            BuildRuntimeHorizonWater(cityRoot.transform, CityWaterLevel, minX, maxX, minZ, maxZ, minVertY);
+
+            sw.Stop();
+            Debug.Log($"[MM2RuntimeCityLoader] Built runtime OSM2World/.osm city '{spec.DisplayName}' ({spec.MapName}) in {sw.ElapsedMilliseconds} ms.");
         }
 
         private static void BuildRuntimeMm1CityFromArchives(CitySpec spec)

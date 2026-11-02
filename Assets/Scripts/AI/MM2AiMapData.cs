@@ -465,6 +465,13 @@ namespace MM2.AI
             {
                 aiData.ParseBai(baiBytes);
             }
+            else if (MM2OsmCitySystem.HasOsmOrObjCity(aiData.CityName))
+            {
+                if (!MM2OsmCitySystem.PopulateAiRoadNetwork(aiData))
+                {
+                    Debug.LogWarning($"[MM2AiMapData] Could not build AI road graph from OSM/OBJ for '{aiData.CityName}'.");
+                }
+            }
             else
             {
                 Debug.LogWarning($"[MM2AiMapData] Could not load binary AI map '{baiPath}'.");
@@ -669,10 +676,14 @@ namespace MM2.AI
                             if (parts.Length >= 8) float.TryParse(parts[7], NumberStyles.Float, CultureInfo.InvariantCulture, out accelFactor);
                             if (parts.Length >= 9) float.TryParse(parts[8], NumberStyles.Float, CultureInfo.InvariantCulture, out detectRadius);
 
+                            Vector3 copPos = MM2OsmCitySystem.HasOsmOrObjCity(CityName)
+                                ? MM2OsmCitySystem.ConvertAuthoringCoordsToUnity(CityName, ax, ay, az, snapToRoadElevation: true)
+                                : new Vector3(-ax, ay, az);
+
                             PoliceSpawns.Add(new PoliceSpawnDefinition
                             {
                                 PkgName = NormalizePolicePkgName(parts[0].Trim()),
-                                Position = new Vector3(-ax, ay, az),
+                                Position = copPos,
                                 Rotation = Quaternion.Euler(0f, 180f - yawDeg, 0f),
                                 StartBehavior = behavior,
                                 MaxSpeed = Mathf.Max(25f, maxSpeed),
@@ -723,7 +734,7 @@ namespace MM2.AI
                                 opp.TopSpeedMultiplier = Mathf.Clamp(topMult, 0.7f, 1.2f);
                             }
 
-                            ParseOpponentOppFile(opp, raceDir);
+                            ParseOpponentOppFile(opp, raceDir, CityName);
                             Opponents.Add(opp);
                         }
                         k++;
@@ -742,7 +753,7 @@ namespace MM2.AI
             return "vpcop";
         }
 
-        private static void ParseOpponentOppFile(OpponentDefinition opp, string raceDir)
+        private static void ParseOpponentOppFile(OpponentDefinition opp, string raceDir, string cityName = null)
         {
             if (opp == null || string.IsNullOrEmpty(opp.OppFileName)) return;
 
@@ -756,6 +767,7 @@ namespace MM2.AI
             string csvText = MM2ArchiveSystem.ReadFileText(vPath);
             if (string.IsNullOrEmpty(csvText)) return;
 
+            bool isOsmCity = !string.IsNullOrEmpty(cityName) && MM2OsmCitySystem.HasOsmOrObjCity(cityName);
             string[] lines = csvText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             bool parsedStartRow = false;
 
@@ -778,7 +790,9 @@ namespace MM2.AI
                     continue;
                 }
 
-                Vector3 unityPos = new Vector3(-ax, ay, az);
+                Vector3 unityPos = isOsmCity
+                    ? MM2OsmCitySystem.ConvertAuthoringCoordsToUnity(cityName, ax, ay, az, snapToRoadElevation: true)
+                    : new Vector3(-ax, ay, az);
 
                 if (!parsedStartRow)
                 {

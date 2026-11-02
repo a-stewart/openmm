@@ -87,11 +87,6 @@ namespace MM2.Archive
             }
 
             string[] allArFiles = Directory.GetFiles(resourcesFolderPath, "*.ar", SearchOption.TopDirectoryOnly);
-            if (allArFiles.Length == 0)
-            {
-                Debug.LogWarning($"[MM2ArchiveSystem] No .ar files found in '{resourcesFolderPath}'.");
-                return;
-            }
 
             // Classify archives by binary container header (ARES, DAVE, or PKZIP mod) rather than archive filename.
             // ARES (MM1) mounts first, DAVE (MM2) second, and PKZIP mod archives last.
@@ -143,8 +138,73 @@ namespace MM2.Archive
                 }
             }
 
+            // Also mount loose files inside resources/ (e.g. OSM2World .obj/.mtl/.osm exports, textures, or .cinfo/.csv files)
+            int looseFilesMounted = MountLooseResourceFiles(resourcesFolderPath);
+
+            if (mountedArchives == 0 && looseFilesMounted == 0)
+            {
+                Debug.LogWarning($"[MM2ArchiveSystem] No .ar files or loose city assets found in '{resourcesFolderPath}'.");
+                return;
+            }
+
             sw.Stop();
-            Debug.Log($"[MM2ArchiveSystem] Mounted {mountedArchives} .ar archives ({Entries.Count:N0} virtual files) from '{resourcesFolderPath}' in {sw.ElapsedMilliseconds} ms.");
+            Debug.Log($"[MM2ArchiveSystem] Mounted {mountedArchives} .ar archives (+{looseFilesMounted} loose files, {Entries.Count:N0} total virtual files) from '{resourcesFolderPath}' in {sw.ElapsedMilliseconds} ms.");
+        }
+
+        private static int MountLooseResourceFiles(string rootDir)
+        {
+            if (string.IsNullOrEmpty(rootDir) || !Directory.Exists(rootDir)) return 0;
+
+            int count = 0;
+            try
+            {
+                string fullRoot = Path.GetFullPath(rootDir).Replace('\\', '/').TrimEnd('/') + "/";
+                string[] allFiles = Directory.GetFiles(rootDir, "*", SearchOption.AllDirectories);
+                Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string filePath in allFiles)
+                {
+                    string ext = Path.GetExtension(filePath).ToLowerInvariant();
+                    if (ext == ".ar" || ext == ".meta" || ext == ".sav" || ext == ".rec" || ext == ".dat" || ext == ".dir")
+                    {
+                        continue;
+                    }
+
+                    string normFull = Path.GetFullPath(filePath).Replace('\\', '/');
+                    if (!normFull.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    string relPath = normFull.Substring(fullRoot.Length);
+                    if (relPath.StartsWith("players/", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(relPath, "readme.txt", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var fi = new FileInfo(filePath);
+                    if (!fi.Exists || fi.Length <= 0 || fi.Length > int.MaxValue) continue;
+
+                    string vPath = NormalizeVirtualPath(relPath);
+                    if (string.IsNullOrEmpty(vPath)) continue;
+
+                    RegisterEntry(new ArchiveEntry
+                    {
+                        ArchiveFilePath = filePath,
+                        VirtualPath = vPath,
+                        DataOffset = 0L,
+                        CompressedSize = (int)fi.Length,
+                        UncompressedSize = (int)fi.Length,
+                        IsDeflated = false,
+                        ArchiveType = 3 // Loose file in resources/
+                    });
+                    count++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[MM2ArchiveSystem] Error scanning loose files in '{rootDir}': {ex.Message}");
+            }
+
+            return count;
         }
 
         private static string ResolveResourcesDirectory()
@@ -446,12 +506,28 @@ namespace MM2.Archive
 
             if (ext == ".tex" || ext == ".tga" || ext == ".bmp")
             {
-                if (vPath.StartsWith("texture/", StringComparison.OrdinalIgnoreCase))
+                if (vPath.StartsWith("texture/", StringComparison.OrdinalIgnoreCase) ||
+                    vPath.IndexOf("_textures/", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     // Prefer .tga over .tex if a mod supplies higher-res TGA textures
                     if (!TextureByStem.TryGetValue(stem, out string existing) ||
                         ext == ".tga" ||
                         !existing.EndsWith(".tga", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TextureByStem[stem] = vPath;
+                    }
+                }
+            }
+            else if (ext == ".png" || ext == ".jpg" || ext == ".jpeg")
+            {
+                if (vPath.StartsWith("texture/", StringComparison.OrdinalIgnoreCase) ||
+                    vPath.StartsWith("city/", StringComparison.OrdinalIgnoreCase) ||
+                    vPath.IndexOf("textures/", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    // Register PNG/JPG textures without overwriting native .tex/.tga base textures
+                    if (!TextureByStem.TryGetValue(stem, out string existing) ||
+                        (!existing.EndsWith(".tex", StringComparison.OrdinalIgnoreCase) &&
+                         !existing.EndsWith(".tga", StringComparison.OrdinalIgnoreCase)))
                     {
                         TextureByStem[stem] = vPath;
                     }
@@ -615,7 +691,12 @@ namespace MM2.Archive
             EnsureInitialized();
             if (string.IsNullOrEmpty(texName)) return null;
 
-            string clean = texName.Trim();
+            string normDirect = NormalizeVirtualPath(texName);
+            if (Entries.ContainsKey(normDirect)) return normDirect;
+            if (Entries.ContainsKey("city/" + normDirect)) return "city/" + normDirect;
+            if (Entries.ContainsKey("texture/" + normDirect)) return "texture/" + normDirect;
+
+            string clean = Path.GetFileName(normDirect);
             int extDot = clean.LastIndexOf('.');
             if (extDot > 0) clean = clean.Substring(0, extDot);
 
